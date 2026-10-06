@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Xcode build output and per-user state
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager build output
+.build/
+.swiftpm/
+
+# Exported app bundles and archives
+*.ipa
+*.xcarchive
+*.dSYM/
+
+# Keep source, project files, shared schemes, assets, and Package.resolved tracked.

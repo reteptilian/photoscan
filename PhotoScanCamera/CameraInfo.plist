@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>NSCameraUsageDescription</key><string>PhotoScan captures full-resolution photos for your archive.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>PhotoScan connects to your Mac to receive capture commands and send photos.</string>
+    <key>NSBonjourServices</key><array><string>_photoscan._tcp</string></array>
+</dict></plist>
