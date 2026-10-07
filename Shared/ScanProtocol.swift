@@ -39,16 +39,83 @@ struct CameraSettings: Codable, Equatable, Sendable {
     let width: Int
     let height: Int
 }
+enum ScanApp: String, Codable, Sendable {
+    case camera = "PhotoScanCamera", desk = "PhotoScanDesk"
+    var other: ScanApp { self == .camera ? .desk : .camera }
+}
+enum ScanCapability {
+    static let capture = "capture.front"
+    static let settings = "settings.lock"
+    static let captureSettings = "capture.settings"
+    static let supported = [capture, settings, captureSettings]
+}
+struct ScanHello: Codable, Equatable, Sendable {
+    let app: ScanApp
+    let appVersion: String
+    let build: String
+    let protocolVersion: Int
+    let capabilities: [String]
+
+    static func current(_ app: ScanApp) -> ScanHello {
+        ScanHello(app: app,
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+            build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+            protocolVersion: ScanWire.version, capabilities: ScanCapability.supported)
+    }
+    var summary: String { "\(app.rawValue) \(appVersion) (build \(build), protocol \(protocolVersion))" }
+}
+struct ScanCompatibilityError: LocalizedError {
+    let reason: String
+    var errorDescription: String? { reason }
+}
+
+// The hello envelope remains readable across protocol revisions. App release numbers
+// are diagnostic only; the protocol and capabilities determine interoperability.
+struct ScanSession {
+    let local: ScanHello
+    private(set) var remote: ScanHello?
+    var ready: Bool { remote != nil }
+    func supports(_ capability: String) -> Bool {
+        local.capabilities.contains(capability) && remote?.capabilities.contains(capability) == true
+    }
+    var missingHandshake: String {
+        "Compatibility check failed. Update \(local.app.other.rawValue) and reconnect."
+    }
+    // Returns true only for application messages after a validated hello.
+    mutating func receive(_ message: ScanMessage, image: Data) throws -> Bool {
+        guard message.kind == "hello" else {
+            guard ready else { throw ScanCompatibilityError(reason: missingHandshake) }
+            return true
+        }
+        guard remote == nil, image.isEmpty, let hello = message.hello, hello.app == local.app.other else {
+            throw ScanCompatibilityError(reason: "Invalid compatibility handshake from \(local.app.other.rawValue). Reconnect or update both apps.")
+        }
+        guard hello.protocolVersion == message.version else {
+            throw ScanCompatibilityError(reason: "Invalid protocol version in compatibility handshake. Update both apps and reconnect.")
+        }
+        guard hello.protocolVersion == local.protocolVersion else {
+            let outdated = hello.protocolVersion < local.protocolVersion ? hello.app : local.app
+            throw ScanCompatibilityError(reason: "Incompatible apps: \(local.summary); \(hello.summary). Update \(outdated.rawValue) and reconnect.")
+        }
+        guard hello.capabilities.contains(ScanCapability.capture), local.capabilities.contains(ScanCapability.capture) else {
+            throw ScanCompatibilityError(reason: "\(hello.summary) cannot support photo capture with this app. Update both apps and reconnect.")
+        }
+        remote = hello
+        return false
+    }
+}
 struct ScanMessage: Codable {
-    var version = 1
+    var version = ScanWire.version
     let kind: String
     var request: CaptureRequest?
     var capture: CaptureInfo?
     var text: String?
     var settings: CameraSettings?
     var commandID: UUID?
+    var hello: ScanHello?
 }
 enum ScanWire {
+    static let version = 1
     static let service = "_photoscan._tcp"
     static let limit = 100 * 1024 * 1024
     static func parameters() -> NWParameters {
@@ -73,8 +140,14 @@ enum ScanWire {
         guard body.count >= 4 else { throw CocoaError(.fileReadCorruptFile) }
         let size = length(body)
         guard size > 0, size <= body.count - 4 else { throw CocoaError(.fileReadCorruptFile) }
-        let message = try JSONDecoder().decode(ScanMessage.self, from: body.subdata(in: 4..<(4 + size)))
-        guard message.version == 1 else { throw CocoaError(.fileReadUnknown) }
+        let json = body.subdata(in: 4..<(4 + size))
+        struct Envelope: Decodable { let version: Int; let kind: String }
+        let envelope = try JSONDecoder().decode(Envelope.self, from: json)
+        // Decode a future hello so the handshake can identify which app needs updating.
+        guard envelope.version == version || envelope.kind == "hello" else {
+            throw ScanCompatibilityError(reason: "Unsupported PhotoScan protocol \(envelope.version). Update both apps and reconnect.")
+        }
+        let message = try JSONDecoder().decode(ScanMessage.self, from: json)
         return (message, body.subdata(in: (4 + size)..<body.count))
     }
 }
@@ -85,15 +158,28 @@ final class ScanConnection {
     var onReady: (() -> Void)?
     var onMessage: ((ScanMessage, Data) -> Void)?
     var onClose: ((String) -> Void)?
+    private(set) var session: ScanSession
+    private var handshakeTimeout: Task<Void, Never>?
     private var buffer = Data()
     private var closed = false
-    init(_ connection: NWConnection) { self.connection = connection }
+    init(_ connection: NWConnection, app: ScanApp) {
+        self.connection = connection
+        session = ScanSession(local: .current(app))
+    }
+    func supports(_ capability: String) -> Bool { session.supports(capability) }
     func start() {
         connection.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
                 guard let self, !self.closed else { return }
                 switch state {
-                case .ready: self.onReady?(); self.receive()
+                case .ready:
+                    self.handshakeTimeout = Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(10))
+                        guard !Task.isCancelled, let self, !self.session.ready else { return }
+                        self.close(self.session.missingHandshake)
+                    }
+                    self.send(ScanMessage(kind: "hello", hello: self.session.local))
+                    self.receive()
                 case .failed(let error): self.close(error.localizedDescription)
                 case .waiting(let error): self.close(error.localizedDescription)
                 case .cancelled: self.close("Disconnected")
@@ -104,6 +190,10 @@ final class ScanConnection {
         connection.start(queue: .main)
     }
     func send(_ message: ScanMessage, image: Data = Data(), completion: ((Bool) -> Void)? = nil) {
+        guard !closed else { completion?(false); return }
+        guard session.ready || message.kind == "hello" else {
+            close(session.missingHandshake); completion?(false); return
+        }
         do {
             let data = try ScanWire.encode(message, image: image)
             connection.send(content: data, completion: .contentProcessed { [weak self] error in
@@ -117,6 +207,7 @@ final class ScanConnection {
     func close(_ reason: String = "Disconnected") {
         guard !closed else { return }
         closed = true
+        handshakeTimeout?.cancel(); handshakeTimeout = nil
         connection.cancel()
         buffer.removeAll()
         onClose?(reason)
@@ -134,7 +225,14 @@ final class ScanConnection {
                         let body = self.buffer.subdata(in: 4..<(size + 4))
                         self.buffer.removeSubrange(0..<(size + 4))
                         let (message, image) = try ScanWire.decode(body)
-                        self.onMessage?(message, image)
+                        let wasReady = self.session.ready
+                        if try self.session.receive(message, image: image) {
+                            self.onMessage?(message, image)
+                        } else if !wasReady {
+                            self.handshakeTimeout?.cancel(); self.handshakeTimeout = nil
+                            self.onReady?()
+                        }
+                        guard !self.closed else { return }
                     }
                 } catch { self.close(error.localizedDescription); return }
                 if let error { self.close(error.localizedDescription) }

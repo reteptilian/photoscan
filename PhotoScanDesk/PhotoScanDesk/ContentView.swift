@@ -14,6 +14,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack {
                 Label(model.status, systemImage: model.connected ? "link" : "wifi")
+                    .help(model.cameraVersion)
                 Spacer()
                 if model.connected {
                     Button("Disconnect", systemImage: "xmark.circle", action: model.disconnect)
@@ -40,7 +41,7 @@ struct ContentView: View {
                        systemImage: model.settings?.locked == true ? "lock.open" : "lock") {
                     model.setLocked(model.settings?.locked != true)
                 }
-                .disabled(!model.connected || model.busy || model.settings == nil)
+                .disabled(!model.connected || !model.supportsSettings || model.busy || model.settings == nil)
                 if let settings = model.settings {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 16) { settingsReadout(settings) }
@@ -54,7 +55,7 @@ struct ContentView: View {
             Divider()
             HStack {
                 Button("Capture Flat Field", systemImage: "rectangle.dashed", action: model.captureFlatField)
-                    .disabled(!model.connected || model.busy || model.folder == nil || model.settings?.locked != true)
+                    .disabled(!model.connected || !model.supportsCalibration || model.busy || model.folder == nil || model.settings?.locked != true)
                 Toggle("Flat-field correction", isOn: $model.applyCorrection)
                     .disabled(model.flatField == nil || model.busy)
                 if model.flatField != nil {
@@ -73,7 +74,7 @@ struct ContentView: View {
             Divider()
             HStack {
                 Button("Capture Gray Chart", systemImage: "eyedropper", action: model.captureGrayChart)
-                    .disabled(!model.connected || model.busy || model.folder == nil || model.settings?.locked != true)
+                    .disabled(!model.connected || !model.supportsCalibration || model.busy || model.folder == nil || model.settings?.locked != true)
                 Toggle("Gray balance", isOn: $model.applyGrayBalance)
                     .disabled(model.grayBalance == nil || model.busy)
                 if model.grayBalance != nil {

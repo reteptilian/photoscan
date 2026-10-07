@@ -51,7 +51,7 @@ Prototype archives are unsupported. Use a new archive folder; there is no migrat
 
 ## Capture and Camera Settings
 
-Shared/ScanProtocol.swift is compiled into both targets. Bonjour discovery and Network.framework TCP carry versioned, length-prefixed JSON headers followed by original image data, bounded to 100 MiB per message. One Mac connects at a time. Disconnects and a 60-second capture timeout clear pending requests. Capture requests carry asset ID and front/back role, but this workflow creates one front asset per capture; pairing is future work.
+Shared/ScanProtocol.swift is compiled into both targets. Bonjour discovery and Network.framework TCP carry versioned, length-prefixed JSON headers followed by original image data, bounded to 100 MiB per message. Both apps exchange a `hello` before enabling capture, including app/build numbers, protocol version, and capabilities. App versions may differ; both must support protocol 1 and `capture.front`. Optional `settings.lock` and `capture.settings` capabilities enable settings controls and calibration respectively (calibration requires both). Missing or incompatible handshakes close the connection with an update message; the handshake times out after 10 seconds. Builds from before this handshake was introduced must be updated on both devices. Keep protocol 1 for backward-compatible optional fields/capabilities; increment it when commands, required fields, or their meaning change incompatibly. App/build numbers are shown in the Desk connection status tooltip for diagnostics. One Mac connects at a time. Disconnects and a 60-second capture timeout clear pending requests. Capture requests carry asset ID and front/back role, but this workflow creates one front asset per capture; pairing is future work.
 
 The iPhone uses the physical main wide-angle camera with flash off and quality prioritization, requesting the largest photo dimensions supported by the active format. Actual resolution depends on device and conditions. Preview and still orientation are portrait.
 
@@ -85,7 +85,15 @@ Build both schemes (camera: generic iOS device, desk: macOS). Synthetic tests re
 
 ```sh
 swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift Tests/ProtocolSmoke.swift -o /tmp/photoscan-protocol-smoke
+
+# Local loopback TCP handshake and timeout checks (requires network access).
+swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift Tests/ConnectionSmoke.swift -o /tmp/photoscan-connection-smoke
+/tmp/photoscan-connection-smoke
 /tmp/photoscan-protocol-smoke
+
+# Local loopback TCP handshake and timeout checks (requires network access).
+swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift Tests/ConnectionSmoke.swift -o /tmp/photoscan-connection-smoke
+/tmp/photoscan-connection-smoke
 
 # Repeat with FlatFieldSmoke, GrayBalanceSmoke, PrintCropSmoke, or FinishedOutputSmoke.
 swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/{FlatField,GrayBalance,PrintCrop,ScanArchive}.swift Tests/FinishedOutputSmoke.swift -o /tmp/photoscan-finished-smoke

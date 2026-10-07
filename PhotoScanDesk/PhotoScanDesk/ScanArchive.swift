@@ -61,11 +61,13 @@ struct ScanManifest: Codable, Sendable {
 }
 enum ArchiveError: LocalizedError {
     case invalidDate, collision, invalidArchive, encoding, pending
+    case unsupportedSchema(Int)
     var errorDescription: String? {
         switch self {
         case .invalidDate: "Use a valid YYYY, YYYY-MM, or YYYY-MM-DD date. Time requires an exact day and HH:mm:ss."
         case .collision: "That asset, index, or filename already exists. No files were overwritten."
         case .invalidArchive: "The archive metadata or source is invalid or unsupported."
+        case .unsupportedSchema(let version): "This folder contains unsupported archive metadata (schema \(version)). Choose a new archive folder for captures. Existing scans have been preserved."
         case .encoding: "The finished image could not be encoded or verified. The previous revision is preserved."
         case .pending: "Accept or explicitly skip crop review before publishing."
         }
@@ -81,7 +83,12 @@ enum ScanArchive {
     }
     static func read(_ asset: URL) throws -> ScanManifest {
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(ScanManifest.self, from: Data(contentsOf: asset.appendingPathComponent("metadata.json")))
+        let data = try Data(contentsOf: asset.appendingPathComponent("metadata.json"))
+        // Check the version before decoding fields that older prototypes do not have.
+        struct Schema: Decodable { let schemaVersion: Int }
+        let schema = try decoder.decode(Schema.self, from: data)
+        guard schema.schemaVersion == 2 else { throw ArchiveError.unsupportedSchema(schema.schemaVersion) }
+        let manifest = try decoder.decode(ScanManifest.self, from: data)
         guard manifest.schemaVersion == 2, manifest.assetID.uuidString == asset.lastPathComponent,
               manifest.index > 0, ["sources/capture.heic", "sources/capture.jpg"].contains(manifest.sourceFile) else { throw ArchiveError.invalidArchive }
         try manifest.document.validate()
@@ -220,10 +227,11 @@ enum ScanArchive {
     }
     static func encode(_ image: CIImage, document: DocumentMetadata, to url: URL, type: UTType = .heic) throws -> (Int, Int) {
         try document.validate()
-        // All filters work in floating-point linear light. Rasterize only once, at 16 bits,
-        // then let the selected format's encoder choose its supported storage precision.
+        // All filters work in floating-point linear light. Rasterize opaque scans only
+        // once, at 16 bits, without an alpha channel that ImageIO would discard.
+        // Let the selected format's encoder choose its supported storage precision.
         guard let cg = FlatField.context().createCGImage(image, from: image.extent,
-            format: .RGBA16, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!),
+            format: .RGBX16, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!),
               let destination = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil) else { throw ArchiveError.encoding }
         CGImageDestinationAddImage(destination, cg, properties(document) as CFDictionary)
         guard CGImageDestinationFinalize(destination),

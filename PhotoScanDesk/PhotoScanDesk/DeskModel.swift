@@ -23,6 +23,9 @@ final class DeskModel: ObservableObject {
     @Published var cameras: [NWBrowser.Result] = []
     @Published var status = "Searching for cameras"
     @Published var connected = false
+    @Published var supportsSettings = false
+    @Published var supportsCalibration = false
+    @Published var cameraVersion = ""
     @Published var busy = false
     @Published var folder: URL?
     @Published var preview: NSImage?
@@ -76,18 +79,26 @@ final class DeskModel: ObservableObject {
     func connect(_ camera: NWBrowser.Result) {
         guard !busy else { return }
         disconnect()
-        error = nil; status = "Connecting"
-        let peer = ScanConnection(NWConnection(to: camera.endpoint, using: ScanWire.parameters()))
+        error = nil; status = "Checking camera compatibility"
+        let peer = ScanConnection(NWConnection(to: camera.endpoint, using: ScanWire.parameters()), app: .desk)
         self.peer = peer
+        peer.onReady = { [weak self, weak peer] in
+            self?.supportsSettings = peer?.supports(ScanCapability.settings) == true
+            self?.supportsCalibration = peer?.supports(ScanCapability.settings) == true
+                && peer?.supports(ScanCapability.captureSettings) == true
+            self?.cameraVersion = peer?.session.remote?.summary ?? ""
+        }
         peer.onClose = { [weak self] reason in
             self?.connected = false; self?.peer = nil
             self?.settings = nil
+            self?.supportsSettings = false; self?.supportsCalibration = false; self?.cameraVersion = ""
             self?.flatField = nil
             self?.grayBalance = nil; self?.chartReference = nil
             self?.finish(); self?.status = "Disconnected"; self?.error = reason
         }
         peer.onMessage = { [weak self] message, image in
             guard let self else { return }
+            guard self.connected || message.kind == "ready" else { return }
             switch message.kind {
             case "ready": self.connected = true; self.status = "Camera ready"
             case "settings":
@@ -113,11 +124,12 @@ final class DeskModel: ObservableObject {
         peer?.close()
         peer = nil; connected = false; finish()
         settings = nil
+        supportsSettings = false; supportsCalibration = false; cameraVersion = ""
         flatField = nil
         grayBalance = nil; chartReference = nil
     }
     func setLocked(_ locked: Bool) {
-        guard connected, !busy, settings != nil else { return }
+        guard connected, supportsSettings, !busy, settings != nil else { return }
         if !locked { flatField = nil; grayBalance = nil; chartReference = nil }
         let commandID = UUID()
         pendingCommand = commandID; busy = true; error = nil
@@ -143,11 +155,11 @@ final class DeskModel: ObservableObject {
         beginCapture(reference: false)
     }
     func captureFlatField() {
-        guard settings?.locked == true else { return }
+        guard supportsCalibration, settings?.locked == true else { return }
         beginCapture(reference: true)
     }
     func captureGrayChart() {
-        guard settings?.locked == true else { return }
+        guard supportsCalibration, settings?.locked == true else { return }
         beginCapture(reference: false, chart: true)
     }
     private func beginCapture(reference: Bool, chart: Bool = false) {

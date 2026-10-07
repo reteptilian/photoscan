@@ -52,22 +52,23 @@ final class CameraModel: ObservableObject {
     }
     private func accept(_ connection: NWConnection) {
         guard peer == nil else { connection.cancel(); return }
-        let peer = ScanConnection(connection)
+        let peer = ScanConnection(connection, app: .camera)
         self.peer = peer
         peer.onReady = { [weak self, weak peer] in
-            self?.connected = true; self?.status = "Connected to Mac"
+            self?.error = nil; self?.connected = true; self?.status = "Connected to Mac"
             peer?.send(ScanMessage(kind: "ready", text: "Main camera"))
             self?.streamSettings()
         }
         peer.onClose = { [weak self] reason in
             self?.peer = nil; self?.connected = false; self?.status = "Waiting for Mac"
             self?.settingsTask?.cancel(); self?.settingsTask = nil
-            if self?.busy == true { self?.error = reason }
+            if reason != "Disconnected" { self?.error = reason }
         }
         peer.onMessage = { [weak self, weak peer] message, _ in
-            guard let self else { return }
+            guard let self, self.connected else { return }
             if message.kind == "lockSettings" || message.kind == "unlockSettings" {
                 guard let commandID = message.commandID else { return }
+                guard peer?.supports(ScanCapability.settings) == true else { return }
                 guard !self.busy, self.ready else {
                     peer?.send(ScanMessage(kind: "error", text: "Camera is busy.", commandID: commandID)); return
                 }

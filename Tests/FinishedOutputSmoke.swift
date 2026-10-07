@@ -22,6 +22,21 @@ struct FinishedOutputSmoke {
         func capture(_ id: UUID = UUID()) -> CaptureInfo {
             CaptureInfo(request: CaptureRequest(assetID: id, side: .front), capturedAt: scanTime, fileExtension: "jpg", width: 100, height: 80, camera: "Main")
         }
+        // Prototype archives lack required schema-2 fields. Reject their schema
+        // explicitly before allocation, preserving the old record and counter.
+        let legacyFolder = folder.appendingPathComponent("legacy")
+        let legacyAsset = legacyFolder.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: legacyAsset, withIntermediateDirectories: true)
+        let legacyData = Data(#"{"schemaVersion":1,"captures":{}}"#.utf8)
+        let legacyMetadata = legacyAsset.appendingPathComponent("metadata.json")
+        try legacyData.write(to: legacyMetadata)
+        do {
+            _ = try ScanArchive.save(capture(), data: bytes, folder: legacyFolder, profile: nil)
+            fatalError("Saved into an unsupported prototype archive")
+        } catch ArchiveError.unsupportedSchema(let version) { precondition(version == 1) }
+        let preservedLegacy = try Data(contentsOf: legacyMetadata)
+        precondition(preservedLegacy == legacyData)
+        precondition(!FileManager.default.fileExists(atPath: legacyFolder.appendingPathComponent(".next-index.json").path))
         let asset = try ScanArchive.save(capture(), data: bytes, folder: folder, profile: nil)
         if CommandLine.arguments.count > 1 {
             print(try ScanArchive.read(asset).index)
@@ -33,6 +48,8 @@ struct FinishedOutputSmoke {
         manifest.recipe.cropReviewed = true
         var final = try ScanArchive.regenerate(asset: asset, recipe: manifest.recipe)
         precondition(final.lastPathComponent == "unknown-date_000001.heic")
+        precondition(properties(final)[kCGImagePropertyHasAlpha as String] as? Bool != true,
+            "Finished scans must be opaque")
         let original = try Data(contentsOf: asset.appendingPathComponent(manifest.sourceFile))
         precondition(original == bytes)
         var doc = DocumentMetadata(title: "Grandma's summer", notes: "Family picnic", labels: ["Family", "Summer"], people: ["Ada"], date: "1956", approximate: true)
@@ -129,6 +146,8 @@ struct FinishedOutputSmoke {
         for type in [UTType.jpeg, .tiff] {
             let exported = folder.appendingPathComponent("export." + type.preferredFilenameExtension!)
             try ScanArchive.export(asset: asset, to: exported, type: type)
+            precondition(properties(exported)[kCGImagePropertyHasAlpha as String] as? Bool != true,
+                "Exports must not contain an unnecessary alpha channel")
             if type == .tiff { precondition(properties(exported)[kCGImagePropertyDepth as String] as? Int == 16) }
             let exportBytes = try Data(contentsOf: exported)
             do { try ScanArchive.export(asset: asset, to: exported, type: type); fatalError("Overwrote export") } catch {}
