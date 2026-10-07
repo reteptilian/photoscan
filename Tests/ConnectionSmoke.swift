@@ -13,9 +13,11 @@ final class ConnectionFixture {
     var receivedCapture = false
     var receivedReady = false
     var closeReason: String?
+    var receivedImages: [Data] = []
+    var progress: [(Int, Int)] = []
 
     init() throws {
-        let parameters = NWParameters.tcp
+        let parameters = ScanWire.parameters()
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
     }
@@ -59,16 +61,18 @@ final class ConnectionFixture {
         }
         listener.start(queue: .main)
         await wait { self.listening }
-        let client = ScanConnection(NWConnection(host: .ipv4(.loopback), port: listener.port!, using: .tcp), app: .desk)
+        let client = ScanConnection(NWConnection(host: .ipv4(.loopback), port: listener.port!, using: ScanWire.parameters()), app: .desk)
         self.client = client
         client.onReady = { [weak self, weak client] in
             self?.clientReady = true
             precondition(client?.supports(ScanCapability.capture) == true)
             client?.send(ScanMessage(kind: "capture", request: CaptureRequest(assetID: UUID(), side: .front)))
         }
-        client.onMessage = { [weak self] message, _ in
+        client.onReceiveProgress = { [weak self] received, total in self?.progress.append((received, total)) }
+        client.onMessage = { [weak self] message, image in
             precondition(self?.clientReady == true)
             if message.kind == "ready" { self?.receivedReady = true }
+            if message.kind == "photo" { self?.receivedImages.append(image) }
         }
         client.onClose = { [weak self] reason in self?.closeReason = reason }
         client.start()
@@ -89,10 +93,35 @@ final class ConnectionFixture {
 struct ConnectionSmoke {
     @MainActor
     static func main() async throws {
+        // Bound Bonjour resolution/TCP establishment, before a hello can arrive.
+        let unresolved = ScanConnection(NWConnection(to: .service(name: "Missing-" + UUID().uuidString,
+            type: ScanWire.service, domain: "local.", interface: nil), using: ScanWire.parameters()),
+            app: .desk, connectionTimeout: .milliseconds(200))
+        var unresolvedReason: String?
+        var unresolvedReady = false
+        unresolved.onClose = { unresolvedReason = $0 }
+        unresolved.onReady = { unresolvedReady = true }
+        let started = ContinuousClock.now
+        unresolved.start()
+        while unresolvedReason == nil {
+            precondition(ContinuousClock.now - started < .seconds(2), "Unbounded connection establishment")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        precondition(!unresolvedReady)
+        precondition(unresolvedReason!.contains("Connecting to camera timed out"))
+
         let normal = try ConnectionFixture()
         try await normal.start()
         await normal.wait { normal.receivedCapture && normal.receivedReady }
         precondition(normal.clientReady && normal.serverReady && normal.closeReason == nil)
+        let payload = Data((0..<(4 * 1024 * 1024)).map { UInt8(truncatingIfNeeded: $0) })
+        normal.server?.send(ScanMessage(kind: "photo"), image: payload)
+        normal.server?.send(ScanMessage(kind: "settings"))
+        normal.server?.send(ScanMessage(kind: "photo"), image: payload)
+        await normal.wait { normal.receivedImages.count == 2 }
+        precondition(normal.receivedImages.allSatisfy { $0 == payload })
+        precondition(normal.progress.contains { $0.0 < $0.1 }, "Report partial image delivery")
+        precondition(normal.progress.filter { $0.0 == $0.1 }.count == 2)
         normal.stop()
 
         let legacy = try ConnectionFixture()

@@ -36,7 +36,7 @@ See [README.md](README.md) for the current workflow, limitations, and test comma
 | S01 | Validate the current workflow | Ready | Validate S10 with a physical iPhone and real prints |
 | S02 | Persistent calibration profiles | Planned | Build on S01 findings |
 | S03 | DKC-Pro multi-patch color correction | Waiting | Charts and verified reference data |
-| S04 | Multi-print extraction | Planned | Reliable crop workflow from S01 |
+| S04 | Multi-print extraction | Done | Automated checks passed; real-print/UI validation remains S01 |
 | S05 | Efficient batch scanning | Planned | S04 and S10; archive/session decisions |
 | S06 | Metadata and OCR | Planned | Stable per-print assets |
 | S07 | Archive browsing and export | Planned | Metadata contract from S06 |
@@ -134,11 +134,19 @@ Verification / progress: waiting for chart arrival and reference verification. N
 
 Goal: turn one capture containing several prints into individual archive assets.
 
-- [ ] Review, add, adjust, and remove detected print boundaries before extraction.
-- [ ] Save each accepted print as a separate asset linked to the original frame and calibration provenance.
-- [ ] Verify missed detections, overlapping candidates, extraction failures, and preservation of the source frame.
+Scope: review all detected suggestions on the calibrated full frame, select a print to adjust its corners, add missed prints manually, and remove false detections. Require valid, non-overlapping boundaries before extraction; touching edges are allowed. Preserve the source frame once, and publish each reviewed print as an independently editable finished HEIC with its own UUID and stable archive index. Explicit Skip Crop still publishes the full frame.
 
-Verification / progress: not started. Current cropping saves one reviewed crop under an existing asset.
+- [x] Review, add, adjust, and remove detected print boundaries before extraction.
+- [x] Save each accepted print as a separate asset linked to the original frame and calibration provenance.
+- [x] Verify missed detections, overlapping candidates, extraction failures, and preservation of the source frame.
+
+Verification / progress (2026-10-07): implemented. Mac Debug and generic iOS device schemes build with signing disabled. [MultiPrintSmoke](Tests/MultiPrintSmoke.swift), PrintCropSmoke, and FinishedOutputSmoke pass. Synthetic checks cover two-print detection, manual selections, empty/duplicate/partial/contained overlaps, touching boundaries, shared source bytes, independent indices, calibration provenance, child regeneration and TIFF export, repeated-extraction rejection, and a second-crop rendering failure followed by successful retry. The UI shows numbered boundaries, selected corner handles, add/remove controls, validation errors, and a picker for the extracted prints; it keeps review open on extraction failure. UI integration is compiled; physical interaction and real-print detection/crop accuracy remain S01.
+
+Storage: the captured UUID directory retains sources/ and metadata.json as the shared frame record, with extractedAssetIDs after success. Children carry sourceAssetID and the frame-relative sourceFile, the original capture information, and a complete processing recipe. They contain no duplicate sources/. All outputs are rendered and verified in hidden staging before publication under the archive lock. Write failures roll back newly published children and preserve the frame record. Index reservations may leave gaps, including the frame's reserved index. Successful extraction is one-shot; subsequent crop, metadata, rotation, preview, Finder, and export operations target individual prints.
+
+Follow-up (2026-10-07): physical feedback showed near-duplicate and interior rectangle suggestions. Detection now consolidates candidates by polygon intersection, favoring outer boundaries while retaining ambiguous partial overlaps for review. MultiPrintSmoke verifies inset duplicates, interior details, rotated containment, and separate/partially overlapping prints. Connection setup now has a 20-second deadline before TCP readiness, separate connection/compatibility/readiness status messages, and a 10-second post-handshake readiness deadline; the previous handshake timer did not cover Bonjour/TCP establishment. Physical connection timing remains to be rechecked.
+
+Remaining issues: batch publication uses several directory moves followed by an atomic frame-record exchange; process termination/power loss between those operations can leave orphan children. Crash recovery and archive reopening remain S09/S07. Physical UI, camera, calibration, and real-print overlap/detection validation are pending. No new calibration-target implementation, archive migration, or batch-session browser was added.
 
 ### S05: Efficient Batch Scanning
 
@@ -189,7 +197,7 @@ Goal: make the apps trustworthy for sustained use and straightforward to install
 - [ ] Verify permission denial, disconnects, insufficient storage, and recovery across app restarts.
 - [ ] Produce installable builds and document supported versions and release verification.
 
-Verification / progress: not started. Current transfer is local TCP with no authentication; failures require a new capture. Address concrete reliability issues in earlier slices as they arise.
+Verification / progress (2026-10-07): incremental connection recovery and diagnostics implemented after physical failures. Shared-LAN Bonjour/TCP replaces AWDL opt-in; keepalives and a bounded retransmission deadline release broken peers. Optional capture.progress messages, incoming frame progress, path/state logs, and last-stage timeout errors distinguish camera processing from transfer. Physical logs showed repeated NECP flow creation failures (`File exists`) on Wi-Fi and AWDL; underlying cause and physical recovery remain unverified. ConnectionSmoke covers connection/handshake deadlines, consecutive 4 MiB transfers, and transfer progress; ProtocolSmoke covers capability negotiation. Current transfer is local TCP with no authentication; failures require a new capture. Address concrete reliability issues in earlier slices as they arise.
 
 ### O01: Live Mac Preview
 
@@ -231,6 +239,7 @@ Links to commits, tests, or supporting documents:
 | 2026-10-07 | Preserve original camera bytes under sources/; publish one clearly named finished image with processing and supported metadata applied. |
 | 2026-10-07 | Use DKC-Pro-specific references for future color fitting; keep neutral gray balance separate. |
 | 2026-10-07 | Hold multi-patch color fitting pending reference verification; implement reviewed print cropping first. |
+| 2026-10-07 | Implement S04 ahead of calibration-target work; retain one shared source frame and independently editable extracted prints, requiring overlap review before publication. |
 | 2026-10-07 | Prioritize the finished-output contract (S10), then physical validation and persistent profiles. |
 | 2026-10-07 | Plan final filenames around original document date plus a stable index; handle unknown/partial dates without substituting the scan date. |
 | 2026-10-07 | Old prototype archives need no backwards compatibility; remove obsolete code instead of maintaining migration or legacy paths. |

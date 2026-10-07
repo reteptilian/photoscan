@@ -16,6 +16,7 @@ struct CropReview: Identifiable {
     let assetURL: URL
     let candidates: [PrintBoundary]
     let preview: CGImage
+    let isRevision: Bool
 }
 
 @MainActor
@@ -26,12 +27,15 @@ final class DeskModel: ObservableObject {
     @Published var supportsSettings = false
     @Published var supportsCalibration = false
     @Published var cameraVersion = ""
+    @Published var connectionPath = ""
+    private var capturePhase = ""
     @Published var busy = false
     @Published var folder: URL?
     @Published var preview: NSImage?
     @Published var latestURL: URL?
     @Published var dimensions = ""
     @Published var count = 0
+    @Published var extractedAssets: [URL] = []
     @Published var error: String?
     @Published var settings: CameraSettings?
     @Published var flatField: FlatFieldProfile?
@@ -79,14 +83,27 @@ final class DeskModel: ObservableObject {
     func connect(_ camera: NWBrowser.Result) {
         guard !busy else { return }
         disconnect()
-        error = nil; status = "Checking camera compatibility"
+        error = nil; status = "Connecting to camera"
         let peer = ScanConnection(NWConnection(to: camera.endpoint, using: ScanWire.parameters()), app: .desk)
         self.peer = peer
+        peer.onPath = { [weak self] path in self?.connectionPath = path }
+        peer.onReceiveProgress = { [weak self] received, total in
+            guard let self, self.pending != nil else { return }
+            self.capturePhase = "Receiving image: \(received * 100 / total)%"
+            self.status = self.capturePhase
+        }
+        peer.onTransportReady = { [weak self] in self?.status = "Checking camera compatibility" }
         peer.onReady = { [weak self, weak peer] in
             self?.supportsSettings = peer?.supports(ScanCapability.settings) == true
             self?.supportsCalibration = peer?.supports(ScanCapability.settings) == true
                 && peer?.supports(ScanCapability.captureSettings) == true
             self?.cameraVersion = peer?.session.remote?.summary ?? ""
+            self?.status = "Waiting for camera readiness"
+            self?.timeout = Task { [weak self, weak peer] in
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled, self?.connected == false else { return }
+                peer?.close("Camera readiness timed out. Keep the phone app open and reconnect.")
+            }
         }
         peer.onClose = { [weak self] reason in
             self?.connected = false; self?.peer = nil
@@ -94,13 +111,15 @@ final class DeskModel: ObservableObject {
             self?.supportsSettings = false; self?.supportsCalibration = false; self?.cameraVersion = ""
             self?.flatField = nil
             self?.grayBalance = nil; self?.chartReference = nil
-            self?.finish(); self?.status = "Disconnected"; self?.error = reason
+            self?.finish(); self?.connectionPath = ""; self?.status = "Disconnected"; self?.error = reason
         }
         peer.onMessage = { [weak self] message, image in
             guard let self else { return }
             guard self.connected || message.kind == "ready" else { return }
             switch message.kind {
-            case "ready": self.connected = true; self.status = "Camera ready"
+            case "ready":
+                self.timeout?.cancel(); self.timeout = nil
+                self.connected = true; self.status = "Camera ready"
             case "settings":
                 self.settings = message.settings
                 if message.settings?.locked != true { self.flatField = nil; self.grayBalance = nil; self.chartReference = nil }
@@ -112,6 +131,9 @@ final class DeskModel: ObservableObject {
                 let settingsError = message.commandID != nil && message.commandID == self.pendingCommand
                 guard captureError || settingsError else { return }
                 self.error = message.text; self.finish(); self.status = "Camera ready"
+            case "captureProgress":
+                guard message.request == self.pending, let stage = message.text else { return }
+                self.capturePhase = stage; self.status = stage
             case "photo":
                 guard let info = message.capture, info.request == self.pending else { return }
                 self.save(info, image: image)
@@ -124,7 +146,7 @@ final class DeskModel: ObservableObject {
         peer?.close()
         peer = nil; connected = false; finish()
         settings = nil
-        supportsSettings = false; supportsCalibration = false; cameraVersion = ""
+        supportsSettings = false; supportsCalibration = false; cameraVersion = ""; connectionPath = ""
         flatField = nil
         grayBalance = nil; chartReference = nil
     }
@@ -169,11 +191,14 @@ final class DeskModel: ObservableObject {
         let request = CaptureRequest(assetID: UUID(), side: .front)
         pending = request; busy = true; error = nil
         status = reference ? "Capturing flat field" : (chart ? "Capturing DKC-Pro chart" : "Capturing and receiving")
+        capturePhase = peer?.supports(ScanCapability.captureProgress) == true
+            ? "Waiting for the phone to acknowledge Capture" : "Waiting for captured image (phone has no progress reporting)"
+        status = capturePhase
         peer?.send(ScanMessage(kind: "capture", request: request))
         timeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(60))
             guard !Task.isCancelled, let self, self.pending == request else { return }
-            self.peer?.close("Capture timed out. Reconnect and try again.")
+            self.peer?.close("Capture timed out after 60 seconds. Last stage: \(self.capturePhase). Reconnect and try again.")
         }
     }
     private func finish() {
@@ -209,7 +234,8 @@ final class DeskModel: ObservableObject {
                 } else if let url {
                     assetURL = url; latestURL = nil; finishedPreview = nil; finishedDimensions = ""
                     document = DocumentMetadata(); previewMode = .finished
-                    preview = NSImage(data: image); dimensions = "\(info.width) x \(info.height)"; count += 1
+                    extractedAssets = []
+                    preview = NSImage(data: image); dimensions = "\(info.width) x \(info.height)"
                     status = "Source saved; crop review pending"
                     detectPrint()
                 }
@@ -224,21 +250,46 @@ final class DeskModel: ObservableObject {
     func clearGrayBalance() { grayBalance = nil }
     func detectPrint() {
         guard !busy, let assetURL else { return }
-        busy = true; processing = true; error = nil; status = "Detecting print"
+        busy = true; processing = true; error = nil; status = "Detecting prints"
         Task {
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<([PrintBoundary], CGImage), Error> in
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<([PrintBoundary], CGImage, Bool), Error> in
                 do {
                     let manifest = try ScanArchive.read(assetURL)
                     let preview = try ScanArchive.previewImage(manifest, asset: assetURL)
-                    return .success((try PrintCrop.detect(CoreImage.CIImage(cgImage: preview)), preview))
+                    let candidates = (try? PrintCrop.detect(CoreImage.CIImage(cgImage: preview))) ?? []
+                    return .success((manifest.finished != nil ? [manifest.recipe.crop ?? .manual] : candidates, preview, manifest.finished != nil))
                 } catch { return .failure(error) }
             }.value
             processing = false; finish()
             switch result {
-            case .success(let (candidates, preview)):
-                cropReview = CropReview(assetURL: assetURL, candidates: candidates, preview: preview)
-                status = candidates.isEmpty ? "No boundary detected; manual crop available" : "Review print boundary"
+            case .success(let (candidates, preview, revision)):
+                cropReview = CropReview(assetURL: assetURL, candidates: candidates, preview: preview, isRevision: revision)
+                status = candidates.isEmpty ? "No boundary detected; manual crop available" : "Review print boundaries"
             case .failure(let failure): error = failure.localizedDescription; status = "Review pending; detection failed"
+            }
+        }
+    }
+    func selectExtracted(_ url: URL) {
+        guard !busy, let manifest = try? ScanArchive.read(url), let final = manifest.finished else { return }
+        assetURL = url; latestURL = url.appendingPathComponent(final.filename)
+        finishedPreview = NSImage(contentsOf: latestURL!); previewMode = .finished
+        document = manifest.document; finishedDimensions = "\(final.width) x \(final.height)"
+    }
+    func extractPrints(_ boundaries: [PrintBoundary]) {
+        guard !busy, let review = cropReview, !review.isRevision else { return }
+        busy = true; processing = true; error = nil; status = "Extracting prints"
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[URL], Error> in
+                Result { try ScanArchive.extract(frame: review.assetURL, boundaries: boundaries) }
+            }.value
+            processing = false; finish()
+            switch result {
+            case .success(let assets):
+                extractedAssets = assets; count += assets.count
+                if let first = assets.first { selectExtracted(first) }
+                cropReview = nil; status = "\(assets.count) prints saved"
+            case .failure(let failure):
+                error = failure.localizedDescription; status = "Extraction failed; source preserved"
             }
         }
     }
@@ -264,6 +315,7 @@ final class DeskModel: ObservableObject {
             processing = false; finish()
             switch result {
             case .success(let url):
+                if latestURL == nil { count += 1 }
                 latestURL = url; finishedPreview = NSImage(contentsOf: url); previewMode = .finished
                 if let manifest = try? ScanArchive.read(assetURL), let final = manifest.finished {
                     document = manifest.document; finishedDimensions = "\(final.width) x \(final.height)"
@@ -312,7 +364,7 @@ final class DeskModel: ObservableObject {
     }
     func revealSource() {
         guard let assetURL, let manifest = try? ScanArchive.read(assetURL) else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([assetURL.appendingPathComponent(manifest.sourceFile)])
+        NSWorkspace.shared.activateFileViewerSelecting([ScanArchive.sourceURL(manifest, asset: assetURL)])
     }
     func name(_ camera: NWBrowser.Result) -> String {
         if case .service(let name, _, _, _) = camera.endpoint { return name }

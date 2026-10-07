@@ -14,7 +14,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack {
                 Label(model.status, systemImage: model.connected ? "link" : "wifi")
-                    .help(model.cameraVersion)
+                    .help([model.cameraVersion, model.connectionPath].filter { !$0.isEmpty }.joined(separator: "\n"))
                 Spacer()
                 if model.connected {
                     Button("Disconnect", systemImage: "xmark.circle", action: model.disconnect)
@@ -83,11 +83,19 @@ struct ContentView: View {
                         .help("Clear gray balance").disabled(model.busy)
                 }
                 Spacer()
-                Button("Detect Print", systemImage: "crop", action: model.detectPrint)
+                Button("Review Prints", systemImage: "crop", action: model.detectPrint)
                     .disabled(model.busy || model.assetURL == nil)
             }
             .padding(.horizontal).padding(.vertical, 10)
             HStack {
+                if !model.extractedAssets.isEmpty {
+                    Picker("Print", selection: Binding(get: { model.assetURL ?? model.extractedAssets[0] },
+                        set: { model.selectExtracted($0) })) {
+                        ForEach(Array(model.extractedAssets.enumerated()), id: \.element) { index, url in
+                            Text("Print \(index + 1)").tag(url)
+                        }
+                    }.frame(width: 150).disabled(model.busy)
+                }
                 Button("Skip Crop Review", action: model.skipCrop).disabled(model.busy || model.assetURL == nil || model.latestURL != nil)
                 Button("Edit Metadata") { model.showMetadata = true }.disabled(model.busy || model.latestURL == nil)
                 Button("Rotate Right", action: model.rotate).disabled(model.busy || model.latestURL == nil)

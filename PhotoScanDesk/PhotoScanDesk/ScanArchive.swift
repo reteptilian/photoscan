@@ -55,12 +55,15 @@ struct ScanManifest: Codable, Sendable {
     let index: Int
     let capture: CaptureInfo
     let sourceFile: String
+    var sourceAssetID: UUID?
+    var extractedAssetIDs: [UUID]?
     var document = DocumentMetadata()
     var recipe: ProcessingRecipe
     var finished: FinishedImage?
 }
 enum ArchiveError: LocalizedError {
     case invalidDate, collision, invalidArchive, encoding, pending
+    case alreadyExtracted
     case unsupportedSchema(Int)
     var errorDescription: String? {
         switch self {
@@ -69,6 +72,7 @@ enum ArchiveError: LocalizedError {
         case .invalidArchive: "The archive metadata or source is invalid or unsupported."
         case .unsupportedSchema(let version): "This folder contains unsupported archive metadata (schema \(version)). Choose a new archive folder for captures. Existing scans have been preserved."
         case .encoding: "The finished image could not be encoded or verified. The previous revision is preserved."
+        case .alreadyExtracted: "This frame has already been extracted. Edit its individual prints instead."
         case .pending: "Accept or explicitly skip crop review before publishing."
         }
     }
@@ -91,6 +95,16 @@ enum ScanArchive {
         let manifest = try decoder.decode(ScanManifest.self, from: data)
         guard manifest.schemaVersion == 2, manifest.assetID.uuidString == asset.lastPathComponent,
               manifest.index > 0, ["sources/capture.heic", "sources/capture.jpg"].contains(manifest.sourceFile) else { throw ArchiveError.invalidArchive }
+        if let sourceID = manifest.sourceAssetID {
+            guard sourceID != manifest.assetID else { throw ArchiveError.invalidArchive }
+            let frameURL = asset.deletingLastPathComponent().appendingPathComponent(sourceID.uuidString)
+            let frameData = try Data(contentsOf: frameURL.appendingPathComponent("metadata.json"))
+            let frameRecord = try decoder.decode(ScanManifest.self, from: frameData)
+            guard frameRecord.sourceAssetID == nil else { throw ArchiveError.invalidArchive }
+            let frame = try read(frameURL)
+            guard frame.sourceAssetID == nil, frame.sourceFile == manifest.sourceFile,
+                  frame.capture.request == manifest.capture.request else { throw ArchiveError.invalidArchive }
+        }
         try manifest.document.validate()
         if let final = manifest.finished {
             guard final.filename == filename(document: manifest.document, index: manifest.index) else { throw ArchiveError.invalidArchive }
@@ -188,8 +202,61 @@ enum ScanArchive {
             }
         }
     }
+    static func sourceURL(_ manifest: ScanManifest, asset: URL) -> URL {
+        let frame = manifest.sourceAssetID.map { asset.deletingLastPathComponent().appendingPathComponent($0.uuidString) } ?? asset
+        return frame.appendingPathComponent(manifest.sourceFile)
+    }
+    // Stage every output before publishing. Roll back new directories if any write fails;
+    // the frame and any previous finished revision are never changed on failure.
+    static func extract(frame: URL, boundaries: [PrintBoundary]) throws -> [URL] {
+        try PrintCrop.validateSelection(boundaries)
+        let folder = frame.deletingLastPathComponent()
+        return try locked(folder) {
+            var original = try read(frame)
+            guard original.sourceAssetID == nil, original.extractedAssetIDs == nil,
+                  original.finished == nil else { throw ArchiveError.alreadyExtracted }
+            let staging = folder.appendingPathComponent(".extraction-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: staging) }
+            var outputs: [URL] = []
+            var published: [URL] = []
+            do {
+                for boundary in boundaries {
+                    let id = UUID(), index = try allocate(folder)
+                    var recipe = original.recipe
+                    recipe.crop = boundary; recipe.cropReviewed = true
+                    var child = ScanManifest(assetID: id, index: index, capture: original.capture,
+                        sourceFile: original.sourceFile, sourceAssetID: original.assetID,
+                        document: original.document, recipe: recipe)
+                    let directory = staging.appendingPathComponent(id.uuidString)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let name = filename(document: child.document, index: index)
+                    let (width, height) = try encode(rendered(child, asset: folder.appendingPathComponent(id.uuidString)),
+                        document: child.document, to: directory.appendingPathComponent(name))
+                    child.finished = FinishedImage(filename: name, width: width, height: height, revision: 1)
+                    try writeJSON(child, to: directory.appendingPathComponent("metadata.json"))
+                    outputs.append(folder.appendingPathComponent(id.uuidString))
+                }
+                let updatedFrame = staging.appendingPathComponent("frame")
+                try FileManager.default.copyItem(at: frame, to: updatedFrame)
+                original.extractedAssetIDs = outputs.map { UUID(uuidString: $0.lastPathComponent)! }
+                try writeJSON(original, to: updatedFrame.appendingPathComponent("metadata.json"))
+                for destination in outputs {
+                    try FileManager.default.moveItem(at: staging.appendingPathComponent(destination.lastPathComponent), to: destination)
+                    published.append(destination)
+                }
+                guard renameatx_np(AT_FDCWD, updatedFrame.path, AT_FDCWD, frame.path, UInt32(RENAME_SWAP)) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                return outputs
+            } catch {
+                for destination in published { try? FileManager.default.removeItem(at: destination) }
+                throw error
+            }
+        }
+    }
     static func rendered(_ manifest: ScanManifest, asset: URL) throws -> CIImage {
-        var output = try FlatField.image(Data(contentsOf: asset.appendingPathComponent(manifest.sourceFile)))
+        var output = try FlatField.image(Data(contentsOf: sourceURL(manifest, asset: asset)))
         if let profile = manifest.recipe.flatField {
             guard profile.matches(manifest.capture) else { throw FlatFieldError.incompatible }
             output = try FlatField.corrected(output, profile: profile)
@@ -250,6 +317,7 @@ enum ScanArchive {
     static func regenerate(asset: URL, document: DocumentMetadata? = nil, recipe: ProcessingRecipe? = nil) throws -> URL {
         try locked(asset.deletingLastPathComponent()) {
             var manifest = try read(asset)
+            guard manifest.extractedAssetIDs == nil else { throw ArchiveError.alreadyExtracted }
             let old = manifest.finished
             if let document { manifest.document = document }
             if let recipe { manifest.recipe = recipe }

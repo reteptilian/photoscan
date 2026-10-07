@@ -93,12 +93,20 @@ final class CameraModel: ObservableObject {
                 peer?.send(ScanMessage(kind: "error", request: request, text: "Camera is busy or capture side is unsupported.")); return
             }
             self.busy = true; self.status = "Capturing"; self.error = nil
+            peer?.trace("Capture accepted by camera")
+            if peer?.supports(ScanCapability.captureProgress) == true {
+                peer?.send(ScanMessage(kind: "captureProgress", request: request, text: "Capturing on phone"))
+            }
             self.engine.capture { [weak self, weak peer] result in
                 Task { @MainActor [weak self, weak peer] in
                     guard let self else { return }
                     switch result {
                     case .success(let photo):
                         self.status = "Sending photo"
+                        peer?.trace("Camera finished processing; image bytes: \(photo.data.count)")
+                        if peer?.supports(ScanCapability.captureProgress) == true {
+                            peer?.send(ScanMessage(kind: "captureProgress", request: request, text: "Phone finished capture; waiting for image transfer"))
+                        }
                         let info = CaptureInfo(request: request, capturedAt: Date(), fileExtension: photo.fileExtension,
                             width: photo.width, height: photo.height, camera: "Main wide-angle camera",
                             settings: photo.settings, photoISO: photo.iso, photoExposureSeconds: photo.exposureSeconds)

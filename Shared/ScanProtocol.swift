@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import OSLog
 
 enum ScanSide: String, Codable, Sendable { case front, back }
 struct CaptureRequest: Codable, Equatable, Sendable {
@@ -47,7 +48,8 @@ enum ScanCapability {
     static let capture = "capture.front"
     static let settings = "settings.lock"
     static let captureSettings = "capture.settings"
-    static let supported = [capture, settings, captureSettings]
+    static let captureProgress = "capture.progress"
+    static let supported = [capture, settings, captureSettings, captureProgress]
 }
 struct ScanHello: Codable, Equatable, Sendable {
     let app: ScanApp
@@ -120,7 +122,15 @@ enum ScanWire {
     static let limit = 100 * 1024 * 1024
     static func parameters() -> NWParameters {
         let parameters = NWParameters.tcp
-        parameters.includePeerToPeer = true
+        // The supported setup uses a shared LAN. Avoid competing AWDL routes.
+        parameters.includePeerToPeer = false
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            // Release the phone's single-client slot after a broken route, including
+            // unplugging a cable used by the connection. Do not wait for TCP defaults.
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 10; tcp.keepaliveInterval = 5; tcp.keepaliveCount = 3
+            tcp.connectionDropTime = 20
+        }
         return parameters
     }
     static func prefix(_ count: Int) -> Data {
@@ -155,24 +165,57 @@ enum ScanWire {
 @MainActor
 final class ScanConnection {
     let connection: NWConnection
+    var onPath: ((String) -> Void)?
+    var onReceiveProgress: ((Int, Int) -> Void)?
+    var onTransportReady: (() -> Void)?
     var onReady: (() -> Void)?
     var onMessage: ((ScanMessage, Data) -> Void)?
     var onClose: ((String) -> Void)?
     private(set) var session: ScanSession
+    private let connectionTimeout: Duration
     private var handshakeTimeout: Task<Void, Never>?
     private var buffer = Data()
     private var closed = false
-    init(_ connection: NWConnection, app: ScanApp) {
+    private let logger = Logger(subsystem: "PhotoScan", category: "Transport")
+    private let traceID = String(UUID().uuidString.prefix(8))
+    private var progressBucket = -1
+    func trace(_ event: String) {
+        logger.notice("[\(self.session.local.app.rawValue, privacy: .public) \(self.traceID, privacy: .public)] \(event, privacy: .public)")
+    }
+    init(_ connection: NWConnection, app: ScanApp, connectionTimeout: Duration = .seconds(20)) {
         self.connection = connection
+        self.connectionTimeout = connectionTimeout
         session = ScanSession(local: .current(app))
     }
     func supports(_ capability: String) -> Bool { session.supports(capability) }
     func start() {
+        trace("Connection starting")
+        connection.pathUpdateHandler = { [weak self] path in
+            MainActor.assumeIsolated {
+                guard let self, !self.closed else { return }
+                let interfaces = path.availableInterfaces.map { "\($0.name)(\($0.type))" }.joined(separator: ", ")
+                let summary = "\(path.status); interfaces: \(interfaces); Wi-Fi: \(path.usesInterfaceType(.wifi)); wired: \(path.usesInterfaceType(.wiredEthernet))"
+                self.trace("Path: " + summary); self.onPath?(summary)
+            }
+        }
+        connection.viabilityUpdateHandler = { [weak self] viable in
+            MainActor.assumeIsolated { self?.trace("Connection viable: \(viable)") }
+        }
+        // Bonjour resolution and TCP establishment can stall before .ready.
+        handshakeTimeout = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.connectionTimeout)
+            guard !Task.isCancelled, !self.closed else { return }
+            self.close("Connecting to camera timed out. Keep the phone app open, check Wi-Fi and Local Network access, then select the camera again.")
+        }
         connection.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
                 guard let self, !self.closed else { return }
+                self.trace("State: \(state)")
                 switch state {
                 case .ready:
+                    self.handshakeTimeout?.cancel()
+                    self.onTransportReady?()
                     self.handshakeTimeout = Task { [weak self] in
                         try? await Task.sleep(for: .seconds(10))
                         guard !Task.isCancelled, let self, !self.session.ready else { return }
@@ -196,9 +239,11 @@ final class ScanConnection {
         }
         do {
             let data = try ScanWire.encode(message, image: image)
+            if message.kind != "settings" { trace("Sending \(message.kind); frame bytes: \(data.count)") }
             connection.send(content: data, completion: .contentProcessed { [weak self] error in
                 MainActor.assumeIsolated {
                     if let error { self?.close(error.localizedDescription) }
+                    else if message.kind != "settings" { self?.trace("TCP send completed: \(message.kind) (not an application acknowledgement)") }
                     completion?(error == nil)
                 }
             })
@@ -207,6 +252,7 @@ final class ScanConnection {
     func close(_ reason: String = "Disconnected") {
         guard !closed else { return }
         closed = true
+        trace("Closed: " + reason)
         handshakeTimeout?.cancel(); handshakeTimeout = nil
         connection.cancel()
         buffer.removeAll()
@@ -221,10 +267,21 @@ final class ScanConnection {
                     while self.buffer.count >= 4 {
                         let size = ScanWire.length(self.buffer)
                         guard size >= 4, size <= ScanWire.limit else { throw CocoaError(.fileReadCorruptFile) }
+                        if size > 256 * 1024 {
+                            let received = min(self.buffer.count - 4, size)
+                            let bucket = received * 20 / size
+                            if bucket != self.progressBucket {
+                                self.progressBucket = bucket
+                                self.trace("Receiving frame: \(received)/\(size) bytes")
+                                self.onReceiveProgress?(received, size)
+                            }
+                        }
                         guard self.buffer.count >= size + 4 else { break }
+                        self.progressBucket = -1
                         let body = self.buffer.subdata(in: 4..<(size + 4))
                         self.buffer.removeSubrange(0..<(size + 4))
                         let (message, image) = try ScanWire.decode(body)
+                        if message.kind != "settings" { self.trace("Received \(message.kind); image bytes: \(image.count)") }
                         let wasReady = self.session.ready
                         if try self.session.receive(message, image: image) {
                             self.onMessage?(message, image)
