@@ -55,6 +55,16 @@ Sampling uses the displayed oriented image's normalized top-left selection coord
 
 The manufacturer describes the neutral targets in its [DKC-Pro guide](https://dgkcolor.tools/wp-content/uploads/2019/09/Complete-Guide-to-the-DKC-Pro-Color-Chart_Final.pdf). DKC-Pro reference colors are not interchangeable with a Macbeth/X-Rite ColorChecker; a future multi-patch fit must use the DKC-Pro's own reference data with a verified color-space/white-point interpretation.
 
+## Print Cropping
+
+After saving a scan, press Detect Print. Review a detected boundary or select Manual, then drag the four corner handles onto the print's corners. Save Crop writes a perspective-corrected 16-bit sRGB TIFF alongside the scan. Crossing corners or moving a corner outside the image is rejected. The Original / Corrected / Cropped selector compares the available versions; Show in Finder reveals the crop when Cropped is selected.
+
+Detection uses Apple's [Vision rectangle detector](https://developer.apple.com/documentation/vision/vndetectrectanglesrequest), and rectification uses [Core Image perspective correction](https://developer.apple.com/documentation/coreimage/ciperspectivecorrection). Up to eight candidates are shown. Detection is a suggestion: internal picture frames, chart patches and background edges can also be detected, so the crop requires review. Manual handles remain available when nothing is detected.
+
+Cropping uses the existing full-frame corrected TIFF if available, otherwise the original. It does not reapply calibration or change the original/full-frame files. Each crop has a unique filename; metadata records the latest crop per side, source filename, normalized corners, and output dimensions. Older crop files remain available. This slice crops one selected print from the latest scan; automatic multi-print extraction is future work.
+
+Multi-patch DKC-Pro color calibration is on hold until the supplied chart reference information can be checked. Neutral gray balance remains available.
+
 ## Verification
 
 Build both Xcode schemes. A physical iPhone is required to verify camera capture and local network discovery.
@@ -78,4 +88,11 @@ DKC-Pro neutral sample and combined processing tests:
 ```sh
 swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/GrayBalanceSmoke.swift -o /tmp/photoscan-gray-smoke
 /tmp/photoscan-gray-smoke
+```
+
+Print detection and crop tests:
+
+```sh
+swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift PhotoScanDesk/PhotoScanDesk/PrintCrop.swift Tests/PrintCropSmoke.swift -o /tmp/photoscan-crop-smoke
+/tmp/photoscan-crop-smoke
 ```

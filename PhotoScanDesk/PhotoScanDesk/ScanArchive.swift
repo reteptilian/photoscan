@@ -9,6 +9,14 @@ struct ScanManifest: Codable {
     var flatFieldID: UUID?
     var correctedFiles: [ScanSide.RawValue: String]?
     var grayBalanceID: UUID?
+    var crops: [ScanSide.RawValue: CropRecord]?
+}
+struct CropRecord: Codable, Sendable {
+    let sourceFile: String
+    let outputFile: String
+    let corners: [CGPoint] // Normalized top-left coordinates: TL, TR, BR, BL.
+    let width: Int
+    let height: Int
 }
 
 enum ScanArchive {

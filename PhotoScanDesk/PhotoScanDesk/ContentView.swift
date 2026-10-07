@@ -62,12 +62,11 @@ struct ContentView: View {
                         .help("Clear flat field").disabled(model.busy)
                 }
                 Spacer()
-                Picker("Preview", selection: $model.showCorrected) {
-                    Text("Original").tag(false)
-                    Text("Corrected").tag(true)
+                Picker("Preview", selection: $model.previewMode) {
+                    ForEach(ScanPreview.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
-                .pickerStyle(.segmented).frame(width: 180)
-                .disabled(model.correctedPreview == nil)
+                .pickerStyle(.segmented).frame(width: 250)
+                .disabled(model.preview == nil)
             }
             .padding(.horizontal).padding(.vertical, 10)
             Divider()
@@ -82,12 +81,14 @@ struct ContentView: View {
                         .help("Clear gray balance").disabled(model.busy)
                 }
                 Spacer()
+                Button("Detect Print", systemImage: "crop", action: model.detectPrint)
+                    .disabled(model.busy || model.latestURL == nil)
             }
             .padding(.horizontal).padding(.vertical, 10)
             Divider()
             ZStack {
                 Color(nsColor: .textBackgroundColor)
-                if let preview = model.showCorrected ? (model.correctedPreview ?? model.preview) : model.preview {
+                if let preview = model.displayedPreview {
                     Image(nsImage: preview).resizable().scaledToFit().padding(20)
                 } else {
                     Image(systemName: "photo").font(.system(size: 64)).foregroundStyle(.tertiary)
@@ -99,7 +100,7 @@ struct ContentView: View {
             HStack {
                 Text(model.folder?.path ?? "No archive folder selected").lineLimit(1).truncationMode(.middle)
                 Spacer()
-                Text(model.dimensions)
+                Text(model.displayedDimensions)
                 Text("\(model.count) saved")
                 Button("Show in Finder", systemImage: "folder", action: model.reveal)
                     .disabled(model.latestURL == nil)
@@ -113,6 +114,9 @@ struct ContentView: View {
         .onAppear { model.start() }
         .sheet(item: $model.chartReference) { chart in
             GrayChartView(chart: chart, model: model)
+        }
+        .sheet(item: $model.cropReview) { review in
+            CropReviewView(review: review, model: model)
         }
     }
     @ViewBuilder

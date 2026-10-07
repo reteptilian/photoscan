@@ -8,6 +8,13 @@ struct ChartReference: Identifiable {
     let data: Data
     var id: UUID { info.request.assetID }
 }
+enum ScanPreview: String, CaseIterable { case original = "Original", corrected = "Corrected", cropped = "Cropped" }
+struct CropReview: Identifiable {
+    let id = UUID()
+    let originalURL: URL
+    let sourceURL: URL
+    let candidates: [PrintBoundary]
+}
 
 @MainActor
 final class DeskModel: ObservableObject {
@@ -24,8 +31,20 @@ final class DeskModel: ObservableObject {
     @Published var settings: CameraSettings?
     @Published var flatField: FlatFieldProfile?
     @Published var applyCorrection = true
-    @Published var showCorrected = true
+    @Published var previewMode: ScanPreview = .corrected
     @Published var correctedPreview: NSImage?
+    @Published var croppedPreview: NSImage?
+    @Published var croppedDimensions = ""
+    @Published var cropReview: CropReview?
+    private var croppedURL: URL?
+    var displayedPreview: NSImage? {
+        switch previewMode {
+        case .original: preview
+        case .corrected: correctedPreview ?? preview
+        case .cropped: croppedPreview ?? preview
+        }
+    }
+    var displayedDimensions: String { previewMode == .cropped && croppedPreview != nil ? croppedDimensions : dimensions }
     @Published var grayBalance: GrayBalanceProfile?
     @Published var applyGrayBalance = true
     @Published var chartReference: ChartReference?
@@ -190,6 +209,7 @@ final class DeskModel: ObservableObject {
         }
     }
     private func displaySaved(_ url: URL, image: Data, info: CaptureInfo) {
+        croppedPreview = nil; croppedURL = nil; croppedDimensions = ""; previewMode = .corrected
         latestURL = url; preview = NSImage(data: image)
         correctedPreview = NSImage(contentsOf: url.deletingLastPathComponent().appendingPathComponent(info.request.side.rawValue + "-corrected.tiff"))
         dimensions = "\(info.width) x \(info.height)"; count += 1
@@ -198,6 +218,48 @@ final class DeskModel: ObservableObject {
         flatField = nil
     }
     func clearGrayBalance() { grayBalance = nil }
+    func detectPrint() {
+        guard !busy, let originalURL = latestURL else { return }
+        let corrected = originalURL.deletingLastPathComponent().appendingPathComponent(originalURL.deletingPathExtension().lastPathComponent + "-corrected.tiff")
+        let sourceURL = FileManager.default.fileExists(atPath: corrected.path) ? corrected : originalURL
+        busy = true; processing = true; error = nil; status = "Detecting print"
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[PrintBoundary], Error> in
+                do { return .success(try PrintCrop.detect(PrintCrop.image(url: sourceURL))) }
+                catch { return .failure(error) }
+            }.value
+            processing = false; finish()
+            switch result {
+            case .success(let candidates):
+                cropReview = CropReview(originalURL: originalURL, sourceURL: sourceURL, candidates: candidates)
+                status = candidates.isEmpty ? "No boundary detected; manual crop available" : "Review print boundary"
+            case .failure(let failure): error = failure.localizedDescription; status = "Detection failed"
+            }
+        }
+    }
+    func saveCrop(_ boundary: PrintBoundary) {
+        guard !busy, let review = cropReview else { return }
+        busy = true; processing = true; error = nil; status = "Saving crop"
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
+                do { return .success(try PrintCrop.save(originalURL: review.originalURL, sourceURL: review.sourceURL, boundary: boundary)) }
+                catch { return .failure(error) }
+            }.value
+            processing = false; finish()
+            switch result {
+            case .success(let url):
+                croppedURL = url; croppedPreview = NSImage(contentsOf: url); previewMode = .cropped
+                if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                   let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+                   let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+                   let height = properties[kCGImagePropertyPixelHeight as String] as? Int {
+                    croppedDimensions = "\(width) x \(height)"
+                }
+                cropReview = nil; status = "Crop saved"
+            case .failure(let failure): error = failure.localizedDescription; status = "Crop failed"
+            }
+        }
+    }
     func calibrateGray(target: DKCGrayTarget, selection: CGRect) {
         guard !busy, let chart = chartReference, let folder, settings?.locked == true else { return }
         busy = true; processing = true; error = nil; status = "Calibrating gray balance"
@@ -216,7 +278,8 @@ final class DeskModel: ObservableObject {
         }
     }
     func reveal() {
-        if let latestURL { NSWorkspace.shared.activateFileViewerSelecting([latestURL]) }
+        let url = previewMode == .cropped ? (croppedURL ?? latestURL) : latestURL
+        if let url { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
     func name(_ camera: NWBrowser.Result) -> String {
         if case .service(let name, _, _, _) = camera.endpoint { return name }
