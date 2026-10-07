@@ -2,6 +2,60 @@ import Foundation
 import Network
 import OSLog
 
+// Bounded app diagnostics, accessible without a debugger. Each app has its own
+// sandbox directory. The phone also relays events to the Mac after negotiation.
+final class ScanDiagnostics: @unchecked Sendable {
+    static let shared = ScanDiagnostics()
+    let url: URL
+    private let lock = NSLock()
+    private let limit: Int
+    init(directory: URL? = nil, limit: Int = 2 * 1024 * 1024) {
+        let root: URL
+        if let directory { root = directory }
+        else if Bundle.main.bundleIdentifier == nil {
+            root = FileManager.default.temporaryDirectory.appendingPathComponent("photoscan-diagnostics-\(ProcessInfo.processInfo.processIdentifier)")
+        } else {
+            #if os(macOS)
+            root = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("Logs/PhotoScan")
+            #else
+            root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Diagnostics")
+            #endif
+        }
+        url = root.appendingPathComponent("diagnostics.log"); self.limit = limit
+    }
+    func record(_ event: String) {
+        lock.lock(); defer { lock.unlock() }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let line = ISO8601DateFormatter().string(from: Date()) + " " + event.replacingOccurrences(of: "\n", with: " | ") + "\n"
+            let bytes = Data(line.utf8.prefix(limit))
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attributes[.size] as? NSNumber, size.intValue + bytes.count > limit {
+                let previous = url.deletingLastPathComponent().appendingPathComponent("diagnostics.previous.log")
+                if FileManager.default.fileExists(atPath: previous.path) { try FileManager.default.removeItem(at: previous) }
+                try FileManager.default.moveItem(at: url, to: previous)
+            }
+            if !FileManager.default.fileExists(atPath: url.path) { try Data().write(to: url) }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd(); try handle.write(contentsOf: bytes)
+        } catch {
+            Logger(subsystem: "PhotoScan", category: "Diagnostics").error("Unable to write diagnostics: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+    func recent() -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = try? Data(contentsOf: url) else { return "" }
+        return String(decoding: data.suffix(64 * 1024), as: UTF8.self)
+    }
+    func shareSnapshot() throws -> URL {
+        lock.lock(); defer { lock.unlock() }
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("PhotoScan-diagnostics-\(UUID().uuidString).log")
+        try FileManager.default.copyItem(at: url, to: destination)
+        return destination
+    }
+}
+
 enum ScanSide: String, Codable, Sendable { case front, back }
 struct CaptureRequest: Codable, Equatable, Sendable {
     let assetID: UUID
@@ -48,8 +102,9 @@ enum ScanCapability {
     static let capture = "capture.front"
     static let settings = "settings.lock"
     static let captureSettings = "capture.settings"
+    static let diagnostics = "diagnostics.relay"
     static let captureProgress = "capture.progress"
-    static let supported = [capture, settings, captureSettings, captureProgress]
+    static let supported = [capture, settings, captureSettings, captureProgress, diagnostics]
 }
 struct ScanHello: Codable, Equatable, Sendable {
     let app: ScanApp
@@ -165,6 +220,7 @@ enum ScanWire {
 @MainActor
 final class ScanConnection {
     let connection: NWConnection
+    var onTrace: ((String) -> Void)?
     var onPath: ((String) -> Void)?
     var onReceiveProgress: ((Int, Int) -> Void)?
     var onTransportReady: (() -> Void)?
@@ -180,6 +236,9 @@ final class ScanConnection {
     private let traceID = String(UUID().uuidString.prefix(8))
     private var progressBucket = -1
     func trace(_ event: String) {
+        let line = "[\(session.local.app.rawValue) \(traceID)] " + event
+        ScanDiagnostics.shared.record(line)
+        onTrace?(line)
         logger.notice("[\(self.session.local.app.rawValue, privacy: .public) \(self.traceID, privacy: .public)] \(event, privacy: .public)")
     }
     init(_ connection: NWConnection, app: ScanApp, connectionTimeout: Duration = .seconds(20)) {
@@ -239,11 +298,11 @@ final class ScanConnection {
         }
         do {
             let data = try ScanWire.encode(message, image: image)
-            if message.kind != "settings" { trace("Sending \(message.kind); frame bytes: \(data.count)") }
+            if message.kind != "settings" && message.kind != "diagnostic" { trace("Sending \(message.kind); frame bytes: \(data.count)") }
             connection.send(content: data, completion: .contentProcessed { [weak self] error in
                 MainActor.assumeIsolated {
                     if let error { self?.close(error.localizedDescription) }
-                    else if message.kind != "settings" { self?.trace("TCP send completed: \(message.kind) (not an application acknowledgement)") }
+                    else if message.kind != "settings" && message.kind != "diagnostic" { self?.trace("TCP send completed: \(message.kind) (not an application acknowledgement)") }
                     completion?(error == nil)
                 }
             })
@@ -281,7 +340,7 @@ final class ScanConnection {
                         let body = self.buffer.subdata(in: 4..<(size + 4))
                         self.buffer.removeSubrange(0..<(size + 4))
                         let (message, image) = try ScanWire.decode(body)
-                        if message.kind != "settings" { self.trace("Received \(message.kind); image bytes: \(image.count)") }
+                        if message.kind != "settings" && message.kind != "diagnostic" { self.trace("Received \(message.kind); image bytes: \(image.count)") }
                         let wasReady = self.session.ready
                         if try self.session.receive(message, image: image) {
                             self.onMessage?(message, image)

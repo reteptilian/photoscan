@@ -10,7 +10,9 @@ final class CameraModel: ObservableObject {
     @Published var ready = false
     @Published var connected = false
     @Published var busy = false
-    @Published var error: String?
+    @Published var error: String? = nil {
+        didSet { if let error { ScanDiagnostics.shared.record("Camera error: " + error) } }
+    }
     private var listener: NWListener?
     private var peer: ScanConnection?
     private var started = false
@@ -18,6 +20,7 @@ final class CameraModel: ObservableObject {
     func start() async {
         guard !started else { return }
         started = true
+        ScanDiagnostics.shared.record("Camera launch: " + ScanHello.current(.camera).summary)
         guard await AVCaptureDevice.requestAccess(for: .video) else {
             error = "Camera access is disabled. Enable it in Settings."; status = "Camera unavailable"; return
         }
@@ -38,6 +41,7 @@ final class CameraModel: ObservableObject {
             listener.service = NWListener.Service(name: "PhotoScan Camera", type: ScanWire.service)
             listener.stateUpdateHandler = { [weak self] state in
                 MainActor.assumeIsolated {
+                    ScanDiagnostics.shared.record("Camera listener: \(state)")
                     if case .ready = state { self?.status = "Waiting for Mac" }
                     if case .failed(let error) = state { self?.error = error.localizedDescription }
                     if case .waiting(let error) = state { self?.error = error.localizedDescription }
@@ -57,6 +61,12 @@ final class CameraModel: ObservableObject {
         peer.onReady = { [weak self, weak peer] in
             self?.error = nil; self?.connected = true; self?.status = "Connected to Mac"
             peer?.send(ScanMessage(kind: "ready", text: "Main camera"))
+            if peer?.supports(ScanCapability.diagnostics) == true {
+                peer?.send(ScanMessage(kind: "diagnostic", text: ScanDiagnostics.shared.recent()))
+                peer?.onTrace = { [weak peer] line in
+                    peer?.send(ScanMessage(kind: "diagnostic", text: line))
+                }
+            }
             self?.streamSettings()
         }
         peer.onClose = { [weak self] reason in

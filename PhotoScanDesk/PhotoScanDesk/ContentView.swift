@@ -28,6 +28,7 @@ struct ContentView: View {
                     }
                     .disabled(model.busy)
                 }
+                Button("Logs", systemImage: "doc.text", action: model.revealDiagnostics)
                 Button("Archive Folder", systemImage: "folder", action: model.chooseFolder)
                     .disabled(model.busy)
                 Button("Capture", systemImage: "camera", action: model.capture)

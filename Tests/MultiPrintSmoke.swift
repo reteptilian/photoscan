@@ -9,6 +9,9 @@ struct MultiPrintSmoke {
         PrintBoundary(corners: [CGPoint(x: x, y: y), CGPoint(x: x + w, y: y),
                                 CGPoint(x: x + w, y: y + h), CGPoint(x: x, y: y + h)])
     }
+    static func consolidate(_ boundaries: [PrintBoundary]) -> [PrintBoundary] {
+        PrintCrop.consolidated(boundaries.map { PrintCandidate(boundary: $0, confidence: 0.8, detector: "test") }).map(\.boundary)
+    }
     static func main() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -21,16 +24,24 @@ struct MultiPrintSmoke {
         let left = box(0.1, 0.2, 0.3, 0.5), right = box(0.6, 0.2, 0.3, 0.5)
         let insetLeft = box(0.12, 0.23, 0.27, 0.46)
         let interiorRight = box(0.62, 0.5, 0.25, 0.17)
-        let suggestions = PrintCrop.consolidated([insetLeft, left, right, interiorRight, left])
+        let suggestions = consolidate([left, insetLeft, right, interiorRight, left])
         check(suggestions == [left, right], "Keep outer boundaries; suppress inset and interior rectangles")
-        check(PrintCrop.consolidated([left, right]) == [left, right], "Keep separated prints")
+        check(consolidate([left, right]) == [left, right], "Keep separated prints")
         let partial = box(0.3, 0.4, 0.3, 0.5)
-        check(PrintCrop.consolidated([left, partial]) == [left, partial], "Keep ambiguous partial overlaps for review")
+        check(consolidate([left, partial]) == [left, partial], "Keep ambiguous partial overlaps for review")
         let rotated = PrintBoundary(corners: [CGPoint(x: 0.6, y: 0.1), CGPoint(x: 0.92, y: 0.14),
             CGPoint(x: 0.85, y: 0.8), CGPoint(x: 0.53, y: 0.75)])
-        check(PrintCrop.consolidated([box(0.64, 0.4, 0.15, 0.2), rotated]) == [rotated], "Suppress an interior rectangle in a rotated print")
+        check(consolidate([box(0.64, 0.4, 0.15, 0.2), rotated]) == [rotated], "Suppress an interior rectangle in a rotated print")
         check(abs(PrintCrop.intersectionArea(left, left) - PrintCrop.area(left.corners)) < 1e-8)
         check(PrintCrop.intersectionArea(left, right) == 0)
+        let preferred = PrintCrop.consolidated([
+            PrintCandidate(boundary: left, confidence: 0.7, detector: "rectangle"),
+            PrintCandidate(boundary: insetLeft, confidence: 0.95, detector: "rectangle"),
+            PrintCandidate(boundary: right, confidence: 0.6, detector: "document"),
+            PrintCandidate(boundary: interiorRight, confidence: 1, detector: "rectangle")])
+        check(preferred.map(\.boundary) == [insetLeft, right], "Prefer confident near duplicates, but reject confident interior rectangles")
+        let ties = consolidate([insetLeft, left])
+        check(ties == [insetLeft], "Confidence ties retain detector ordering")
         let detected = try PrintCrop.detect(paper)
         for expected in [left, right] {
             check(detected.contains { candidate in

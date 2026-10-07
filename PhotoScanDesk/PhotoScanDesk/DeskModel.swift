@@ -36,7 +36,9 @@ final class DeskModel: ObservableObject {
     @Published var dimensions = ""
     @Published var count = 0
     @Published var extractedAssets: [URL] = []
-    @Published var error: String?
+    @Published var error: String? = nil {
+        didSet { if let error { ScanDiagnostics.shared.record("Desk error: " + error) } }
+    }
     @Published var settings: CameraSettings?
     @Published var flatField: FlatFieldProfile?
     @Published var applyCorrection = true
@@ -62,6 +64,7 @@ final class DeskModel: ObservableObject {
     private var timeout: Task<Void, Never>?
 
     func start() {
+        ScanDiagnostics.shared.record("Desk launch: " + ScanHello.current(.desk).summary)
         guard browser == nil else { return }
         let browser = NWBrowser(for: .bonjour(type: ScanWire.service, domain: nil), using: ScanWire.parameters())
         browser.browseResultsChangedHandler = { [weak self] results, _ in
@@ -115,6 +118,11 @@ final class DeskModel: ObservableObject {
         }
         peer.onMessage = { [weak self] message, image in
             guard let self else { return }
+            if message.kind == "diagnostic", self.peer?.supports(ScanCapability.diagnostics) == true,
+               let text = message.text, text.utf8.count <= 64 * 1024 {
+                for line in text.split(separator: "\n") { ScanDiagnostics.shared.record("Phone relay: " + line) }
+                return
+            }
             guard self.connected || message.kind == "ready" else { return }
             switch message.kind {
             case "ready":
@@ -250,6 +258,7 @@ final class DeskModel: ObservableObject {
     func clearGrayBalance() { grayBalance = nil }
     func detectPrint() {
         guard !busy, let assetURL else { return }
+        ScanDiagnostics.shared.record("Review asset: " + assetURL.lastPathComponent)
         busy = true; processing = true; error = nil; status = "Detecting prints"
         Task {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<([PrintBoundary], CGImage, Bool), Error> in
@@ -358,6 +367,10 @@ final class DeskModel: ObservableObject {
             case .failure(let failure): error = failure.localizedDescription; status = "Calibration failed"
             }
         }
+    }
+    func revealDiagnostics() {
+        ScanDiagnostics.shared.record("Diagnostics revealed")
+        NSWorkspace.shared.activateFileViewerSelecting([ScanDiagnostics.shared.url])
     }
     func reveal() {
         if let latestURL { NSWorkspace.shared.activateFileViewerSelecting([latestURL]) }

@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = CameraModel()
+    @State private var diagnosticSnapshot: URL?
     var body: some View {
         VStack(spacing: 16) {
             CameraPreview(session: model.engine.session)
@@ -21,6 +22,13 @@ struct ContentView: View {
                 if model.busy { ProgressView() }
                 Spacer()
                 if model.connected { Button("Disconnect", systemImage: "xmark.circle", action: model.disconnect) }
+            }
+            HStack {
+                Button(diagnosticSnapshot == nil ? "Prepare Diagnostics" : "Refresh Diagnostics") {
+                    do { diagnosticSnapshot = try ScanDiagnostics.shared.shareSnapshot() }
+                    catch { model.error = error.localizedDescription }
+                }
+                if let diagnosticSnapshot { ShareLink("Share Diagnostics", item: diagnosticSnapshot) }
             }
             if let error = model.error { Text(error).foregroundStyle(.red) }
         }

@@ -14,6 +14,7 @@ final class ConnectionFixture {
     var receivedReady = false
     var closeReason: String?
     var receivedImages: [Data] = []
+    var receivedDiagnostics: [String] = []
     var progress: [(Int, Int)] = []
 
     init() throws {
@@ -73,6 +74,7 @@ final class ConnectionFixture {
             precondition(self?.clientReady == true)
             if message.kind == "ready" { self?.receivedReady = true }
             if message.kind == "photo" { self?.receivedImages.append(image) }
+            if message.kind == "diagnostic", let text = message.text { self?.receivedDiagnostics.append(text) }
         }
         client.onClose = { [weak self] reason in self?.closeReason = reason }
         client.start()
@@ -114,11 +116,16 @@ struct ConnectionSmoke {
         try await normal.start()
         await normal.wait { normal.receivedCapture && normal.receivedReady }
         precondition(normal.clientReady && normal.serverReady && normal.closeReason == nil)
+        precondition(normal.client?.supports(ScanCapability.diagnostics) == true)
+        normal.server?.onTrace = { [weak server = normal.server] line in
+            server?.send(ScanMessage(kind: "diagnostic", text: line))
+        }
         let payload = Data((0..<(4 * 1024 * 1024)).map { UInt8(truncatingIfNeeded: $0) })
         normal.server?.send(ScanMessage(kind: "photo"), image: payload)
         normal.server?.send(ScanMessage(kind: "settings"))
         normal.server?.send(ScanMessage(kind: "photo"), image: payload)
         await normal.wait { normal.receivedImages.count == 2 }
+        precondition(normal.receivedDiagnostics.contains { $0.contains("Sending photo") }, "Relay phone traces without recursion")
         precondition(normal.receivedImages.allSatisfy { $0 == payload })
         precondition(normal.progress.contains { $0.0 < $0.1 }, "Report partial image delivery")
         precondition(normal.progress.filter { $0.0 == $0.1 }.count == 2)

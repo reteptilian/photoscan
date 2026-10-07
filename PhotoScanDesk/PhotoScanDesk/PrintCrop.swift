@@ -15,6 +15,11 @@ struct PrintBoundary: Codable, Equatable, Sendable {
         return crosses.allSatisfy { $0 > 0.001 }
     }
 }
+struct PrintCandidate: Sendable {
+    let boundary: PrintBoundary
+    let confidence: Float
+    let detector: String
+}
 enum PrintCropError: LocalizedError {
     case invalidBoundary, missingImage, emptySelection, overlapping
     var errorDescription: String? {
@@ -59,10 +64,10 @@ enum PrintCrop {
         let document = VNDetectDocumentSegmentationRequest()
         // Document segmentation handles prints whose edges don't produce a strong
         // enough rectangle response. Rectangle candidates remain available below.
-        var candidates: [PrintBoundary] = []
+        var candidates: [PrintCandidate] = []
         if (try? handler.perform([document])) != nil {
             candidates = (document.results ?? []).filter { $0.confidence >= 0.6 }
-                .map(boundary).filter(\.valid)
+                .map { PrintCandidate(boundary: boundary($0), confidence: $0.confidence, detector: "document") }
         }
         let request = VNDetectRectanglesRequest()
         request.maximumObservations = 8
@@ -73,8 +78,12 @@ enum PrintCrop {
         request.quadratureTolerance = 30
         do { try handler.perform([request]) }
         catch { if candidates.isEmpty { throw error } }
-        candidates.append(contentsOf: (request.results ?? []).map(boundary).filter(\.valid))
-        return Array(consolidated(candidates).prefix(8))
+        candidates.append(contentsOf: (request.results ?? []).map { PrintCandidate(boundary: boundary($0), confidence: $0.confidence, detector: "rectangle") })
+        let retained = Array(consolidated(candidates).prefix(8))
+        for (index, candidate) in candidates.enumerated() {
+            ScanDiagnostics.shared.record("Detection \(index): detector=\(candidate.detector), confidence=\(candidate.confidence), corners=\(candidate.boundary.corners), retained=\(retained.contains { $0.boundary == candidate.boundary && $0.detector == candidate.detector && $0.confidence == candidate.confidence })")
+        }
+        return retained.map(\.boundary)
     }
     static func area(_ polygon: [CGPoint]) -> CGFloat {
         guard polygon.count >= 3 else { return 0 }
@@ -105,26 +114,32 @@ enum PrintCrop {
         }
         return area(polygon)
     }
-    static func consolidated(_ candidates: [PrintBoundary]) -> [PrintBoundary] {
-        // Prefer the outer print boundary over a slightly inset duplicate or a
-        // rectangle formed by details inside the photograph. Partial overlaps
-        // remain visible for review, rather than guessing which print to discard.
-        let ordered = candidates.filter(\.valid).enumerated().sorted {
-            let a = area($0.element.corners), b = area($1.element.corners)
-            return a == b ? $0.offset < $1.offset : a > b
-        }
-        var retained: [(Int, PrintBoundary)] = []
-        for (index, candidate) in ordered {
-            let candidateArea = area(candidate.corners)
-            let duplicate = retained.contains { _, existing in
-                let intersection = intersectionArea(candidate, existing)
-                let union = candidateArea + area(existing.corners) - intersection
-                return intersection / candidateArea >= 0.9 || intersection / union >= 0.75
+    static func consolidated(_ candidates: [PrintCandidate]) -> [PrintCandidate] {
+        let valid = candidates.enumerated().filter { $0.element.boundary.valid && $0.element.confidence.isFinite }
+        // First remove substantially smaller interior rectangles. Confidence in
+        // recognizing a rectangle cannot identify it as the photograph's edge.
+        let outer = valid.filter { item in
+            let small = area(item.element.boundary.corners)
+            return !valid.contains { other in
+                let large = area(other.element.boundary.corners)
+                return small / large < 0.75 && intersectionArea(item.element.boundary, other.element.boundary) / small >= 0.9
             }
-            if !duplicate { retained.append((index, candidate)) }
         }
-        // Keep detector ordering stable for numbered review and archive indices.
-        return retained.sorted { $0.0 < $1.0 }.map { $0.1 }
+        // Near duplicates compete by confidence, retaining detector order on ties.
+        // Scores are a heuristic, not a calibrated probability of edge accuracy.
+        let ordered = outer.sorted {
+            $0.element.confidence == $1.element.confidence ? $0.offset < $1.offset : $0.element.confidence > $1.element.confidence
+        }
+        var retained: [(offset: Int, element: PrintCandidate)] = []
+        for item in ordered {
+            let duplicate = retained.contains { existing in
+                let intersection = intersectionArea(item.element.boundary, existing.element.boundary)
+                let union = area(item.element.boundary.corners) + area(existing.element.boundary.corners) - intersection
+                return intersection / union >= 0.75
+            }
+            if !duplicate { retained.append(item) }
+        }
+        return retained.sorted { $0.offset < $1.offset }.map(\.element)
     }
 
     private static func boundary(_ observation: VNRectangleObservation) -> PrintBoundary {
