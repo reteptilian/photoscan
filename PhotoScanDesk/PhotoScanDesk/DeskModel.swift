@@ -3,12 +3,6 @@ import Combine
 import ImageIO
 import Network
 
-struct ScanManifest: Codable {
-    var schemaVersion = 1
-    let assetID: UUID
-    var captures: [ScanSide.RawValue: CaptureInfo]
-}
-
 @MainActor
 final class DeskModel: ObservableObject {
     @Published var cameras: [NWBrowser.Result] = []
@@ -22,6 +16,12 @@ final class DeskModel: ObservableObject {
     @Published var count = 0
     @Published var error: String?
     @Published var settings: CameraSettings?
+    @Published var flatField: FlatFieldProfile?
+    @Published var applyCorrection = true
+    @Published var showCorrected = true
+    @Published var correctedPreview: NSImage?
+    private var referenceCapture = false
+    private var processing = false
     private var browser: NWBrowser?
     private var peer: ScanConnection?
     private var pending: CaptureRequest?
@@ -55,6 +55,7 @@ final class DeskModel: ObservableObject {
         peer.onClose = { [weak self] reason in
             self?.connected = false; self?.peer = nil
             self?.settings = nil
+            self?.flatField = nil
             self?.finish(); self?.status = "Disconnected"; self?.error = reason
         }
         peer.onMessage = { [weak self] message, image in
@@ -63,6 +64,7 @@ final class DeskModel: ObservableObject {
             case "ready": self.connected = true; self.status = "Camera ready"
             case "settings":
                 self.settings = message.settings
+                if message.settings?.locked != true { self.flatField = nil }
                 if let commandID = message.commandID, commandID == self.pendingCommand {
                     self.finish(); self.status = message.settings?.locked == true ? "Settings locked" : "Automatic settings"
                 }
@@ -83,9 +85,11 @@ final class DeskModel: ObservableObject {
         peer?.close()
         peer = nil; connected = false; finish()
         settings = nil
+        flatField = nil
     }
     func setLocked(_ locked: Bool) {
         guard connected, !busy, settings != nil else { return }
+        if !locked { flatField = nil }
         let commandID = UUID()
         pendingCommand = commandID; busy = true; error = nil
         status = locked ? "Settling and locking settings" : "Unlocking settings"
@@ -104,12 +108,21 @@ final class DeskModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         if let folder { folder.stopAccessingSecurityScopedResource() }
         _ = url.startAccessingSecurityScopedResource()
-        folder = url; error = nil
+        folder = url; error = nil; flatField = nil
     }
     func capture() {
+        beginCapture(reference: false)
+    }
+    func captureFlatField() {
+        guard settings?.locked == true else { return }
+        beginCapture(reference: true)
+    }
+    private func beginCapture(reference: Bool) {
         guard connected, !busy, folder != nil else { return }
+        referenceCapture = reference
         let request = CaptureRequest(assetID: UUID(), side: .front)
-        pending = request; busy = true; error = nil; status = "Capturing and receiving"
+        pending = request; busy = true; error = nil
+        status = reference ? "Capturing flat field" : "Capturing and receiving"
         peer?.send(ScanMessage(kind: "capture", request: request))
         timeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(60))
@@ -118,37 +131,48 @@ final class DeskModel: ObservableObject {
         }
     }
     private func finish() {
-        timeout?.cancel(); timeout = nil; pending = nil; pendingCommand = nil; busy = false
+        timeout?.cancel(); timeout = nil; pending = nil; pendingCommand = nil; busy = processing
     }
     private func save(_ info: CaptureInfo, image: Data) {
-        defer { finish() }
         guard let folder else { return }
-        do {
-            guard ["heic", "jpg"].contains(info.fileExtension), !image.isEmpty,
-                  CGImageSourceCreateWithData(image as CFData, nil) != nil else {
-                throw CocoaError(.fileReadCorruptFile)
+        let reference = referenceCapture
+        let profile = applyCorrection && !reference ? flatField : nil
+        processing = true; finish()
+        status = reference ? "Building flat field" : "Saving and processing"
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<(URL?, FlatFieldProfile?), Error> in
+                do {
+                    if reference {
+                        return .success((nil, try ScanArchive.saveReference(info, data: image, folder: folder)))
+                    }
+                    return .success((try ScanArchive.save(info, data: image, folder: folder, profile: profile), nil))
+                } catch { return .failure(error) }
+            }.value
+            processing = false; finish()
+            switch result {
+            case .success(let (url, calibration)):
+                if let calibration {
+                    if connected && settings?.locked == true { flatField = calibration }
+                    status = "Flat field saved"
+                } else if let url {
+                    displaySaved(url, image: image, info: info)
+                    status = "Saved"
+                }
+            case .failure(let saved as SavedOriginalError):
+                displaySaved(saved.url, image: image, info: info)
+                error = saved.localizedDescription; status = "Original saved"
+            case .failure(let failure):
+                error = failure.localizedDescription; status = "Save failed"
             }
-            let destination = folder.appendingPathComponent(info.request.assetID.uuidString, isDirectory: true)
-            let staging = folder.appendingPathComponent(".pending-" + UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
-            do {
-                let filename = info.request.side.rawValue + "." + info.fileExtension
-                try image.write(to: staging.appendingPathComponent(filename), options: .atomic)
-                let manifest = ScanManifest(assetID: info.request.assetID, captures: [info.request.side.rawValue: info])
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                encoder.dateEncodingStrategy = .iso8601
-                try encoder.encode(manifest).write(to: staging.appendingPathComponent("metadata.json"), options: .atomic)
-                try FileManager.default.moveItem(at: staging, to: destination)
-                latestURL = destination.appendingPathComponent(filename)
-                preview = NSImage(data: image)
-                dimensions = "\(info.width) x \(info.height)"
-                count += 1; status = "Saved"
-            } catch {
-                try? FileManager.default.removeItem(at: staging)
-                throw error
-            }
-        } catch { self.error = "Could not save photo: " + error.localizedDescription; status = "Save failed" }
+        }
+    }
+    private func displaySaved(_ url: URL, image: Data, info: CaptureInfo) {
+        latestURL = url; preview = NSImage(data: image)
+        correctedPreview = NSImage(contentsOf: url.deletingLastPathComponent().appendingPathComponent(info.request.side.rawValue + "-corrected.tiff"))
+        dimensions = "\(info.width) x \(info.height)"; count += 1
+    }
+    func clearFlatField() {
+        flatField = nil
     }
     func reveal() {
         if let latestURL { NSWorkspace.shared.activateFileViewerSelecting([latestURL]) }

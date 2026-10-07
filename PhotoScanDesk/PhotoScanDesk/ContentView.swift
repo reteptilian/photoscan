@@ -50,9 +50,29 @@ struct ContentView: View {
             }
             .padding(.horizontal).padding(.vertical, 10)
             Divider()
+            HStack {
+                Button("Capture Flat Field", systemImage: "rectangle.dashed", action: model.captureFlatField)
+                    .disabled(!model.connected || model.busy || model.folder == nil || model.settings?.locked != true)
+                Toggle("Flat-field correction", isOn: $model.applyCorrection)
+                    .disabled(model.flatField == nil || model.busy)
+                if model.flatField != nil {
+                    Image(systemName: "checkmark.circle").foregroundStyle(.green).help("Flat field ready")
+                    Button(action: model.clearFlatField) { Image(systemName: "trash") }
+                        .help("Clear flat field").disabled(model.busy)
+                }
+                Spacer()
+                Picker("Preview", selection: $model.showCorrected) {
+                    Text("Original").tag(false)
+                    Text("Corrected").tag(true)
+                }
+                .pickerStyle(.segmented).frame(width: 180)
+                .disabled(model.correctedPreview == nil)
+            }
+            .padding(.horizontal).padding(.vertical, 10)
+            Divider()
             ZStack {
                 Color(nsColor: .textBackgroundColor)
-                if let preview = model.preview {
+                if let preview = model.showCorrected ? (model.correctedPreview ?? model.preview) : model.preview {
                     Image(nsImage: preview).resizable().scaledToFit().padding(20)
                 } else {
                     Image(systemName: "photo").font(.system(size: 64)).foregroundStyle(.tertiary)

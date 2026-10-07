@@ -1,12 +1,12 @@
 import Foundation
 import Network
 
-enum ScanSide: String, Codable { case front, back }
-struct CaptureRequest: Codable, Equatable {
+enum ScanSide: String, Codable, Sendable { case front, back }
+struct CaptureRequest: Codable, Equatable, Sendable {
     let assetID: UUID
     let side: ScanSide
 }
-struct CaptureInfo: Codable {
+struct CaptureInfo: Codable, Sendable {
     let request: CaptureRequest
     let capturedAt: Date
     let fileExtension: String

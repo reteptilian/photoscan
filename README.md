@@ -33,6 +33,16 @@ This prototype uses local TCP without authentication or encryption; use it on a 
 
 Archive folder selection lasts for the current app session. Images are committed with their manifest by renaming a staging directory; partial writes are not reported as saved.
 
+## Flat-Field Calibration
+
+With the phone and lights fixed in their scanning positions, focus on a print and Lock Settings. Replace it with a blank matte neutral sheet at the same height, filling the frame. Choose the archive folder, then press Capture Flat Field. Keep the sheet below clipping: an overexposed white sheet cannot measure lighting variation. A moderately bright gray sheet works well.
+
+Replace the sheet with a print without moving the camera or lights. With Flat-field correction enabled, Capture saves the original plus front-corrected.tiff, a 16-bit sRGB TIFF. The Original/Corrected selector switches the preview. Correction runs in the background; the original is still saved if correction fails.
+
+References are archived under _calibrations/<profile UUID>/ with reference.heic (or .jpg) and profile.json. Each corrected scan's metadata records the profile UUID and corrected filename. The active reference lasts for the current connection and archive folder; unlocking, disconnecting, or choosing a folder clears it. Recapture after restarting either app. Existing profiles are retained as provenance; loading them is not yet implemented.
+
+The algorithm smooths a low-resolution reference luminance field and multiplies subsequent images by its mean-normalized reciprocal in linear light using [Core Image](https://developer.apple.com/documentation/coreimage/cicontext/workingcolorspace). Gains outside 0.5 to 2 are rejected, as are dark or near-clipped reference samples. It preserves color ratios and average reference brightness; it does not calibrate white balance or replace a color-chart correction. Uneven paper, shadows, marks, changes to lighting, or moving the phone invalidate the reference even if camera settings still match.
+
 ## Verification
 
 Build both Xcode schemes. A physical iPhone is required to verify camera capture and local network discovery.
@@ -42,4 +52,11 @@ Protocol smoke test:
 ```sh
 swiftc -parse-as-library Shared/ScanProtocol.swift Tests/ProtocolSmoke.swift -o /tmp/photoscan-protocol-smoke
 /tmp/photoscan-protocol-smoke
+```
+
+Synthetic flat-field and archive tests:
+
+```sh
+swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/FlatFieldSmoke.swift -o /tmp/photoscan-flatfield-smoke
+/tmp/photoscan-flatfield-smoke
 ```

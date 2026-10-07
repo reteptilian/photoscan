@@ -11,7 +11,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		AABBCCDD0011223344556677 /* Shared */ = {
+		AABBCCDD0011223344556677 /* ../Shared */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = ../Shared;
 			sourceTree = "<group>";
@@ -38,7 +38,7 @@
 			isa = PBXGroup;
 			children = (
 				DDA6CD1B30756C2E002B03D3 /* PhotoScanDesk */,
-				AABBCCDD0011223344556677 /* Shared */,
+				AABBCCDD0011223344556677 /* ../Shared */,
 				DDA6CD1A30756C2E002B03D3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -67,8 +67,8 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
+				AABBCCDD0011223344556677 /* ../Shared */,
 				DDA6CD1B30756C2E002B03D3 /* PhotoScanDesk */,
-				AABBCCDD0011223344556677 /* Shared */,
 			);
 			name = PhotoScanDesk;
 			packageProductDependencies = (
@@ -263,9 +263,9 @@
 				DEVELOPMENT_TEAM = DSL8CM55HB;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
-				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DeskInfo.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -296,12 +296,12 @@
 				DEVELOPMENT_TEAM = DSL8CM55HB;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
-				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_FILE = DeskInfo.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
