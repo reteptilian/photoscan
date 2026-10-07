@@ -15,10 +15,15 @@ struct FlatFieldProfile: Codable, Sendable {
 }
 
 enum FlatFieldError: LocalizedError {
-    case invalidReference, incompatible, invalidImage
+    case invalidReference(reason: String? = nil), incompatible, invalidImage
     var errorDescription: String? {
         switch self {
-        case .invalidReference: "Reference is too dark, clipped, or uneven. Use a blank matte neutral sheet filling the frame, with settings locked."
+        case .invalidReference(let reason):
+            if let reason {
+                "Reference is too dark, clipped, or uneven.\n" + reason + "\nUse a blank matte neutral sheet filling the frame, with settings locked."
+            } else {
+                "Reference is too dark, clipped, or uneven. Use a blank matte neutral sheet filling the frame, with settings locked."
+            }
         case .incompatible: "Flat-field settings or dimensions do not match. Capture a new reference or turn off correction."
         case .invalidImage: "Could not decode the captured image."
         }
@@ -26,6 +31,7 @@ enum FlatFieldError: LocalizedError {
 }
 
 enum FlatField {
+    static let allowedGains: ClosedRange<Float> = 0.25...4
     static var linear: CGColorSpace { CGColorSpace(name: CGColorSpace.extendedLinearSRGB)! }
     static func context() -> CIContext {
         CIContext(options: [.workingColorSpace: linear, .workingFormat: CIFormat.RGBAf])
@@ -36,8 +42,16 @@ enum FlatField {
         }
         return image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
     }
+    static func format(_ value: Float) -> String {
+        String(format: "%.3f", value)
+    }
+    static func invalidReference(_ reason: String) -> FlatFieldError {
+        .invalidReference(reason: reason)
+    }
     static func makeProfile(data: Data, info: CaptureInfo) throws -> FlatFieldProfile {
-        guard info.settings?.locked == true else { throw FlatFieldError.invalidReference }
+        guard info.settings?.locked == true else {
+            throw invalidReference("Diagnostics: camera settings were not locked for this capture.")
+        }
         let source = try image(data)
         let width = 64
         let height = max(2, Int((Double(width) * source.extent.height / source.extent.width).rounded()))
@@ -50,20 +64,52 @@ enum FlatField {
             context().render(smooth, toBitmap: $0.baseAddress!, rowBytes: width * 16, bounds: bounds, format: .RGBAf, colorSpace: linear)
         }
         var luminance = [Float]()
+        var minChannel = Float.greatestFiniteMagnitude
+        var maxChannel = -Float.greatestFiniteMagnitude
+        var minLuminance = Float.greatestFiniteMagnitude
+        var maxLuminance = -Float.greatestFiniteMagnitude
+        var nonFinite = 0
+        var dark = 0
+        var clipped = 0
         for offset in stride(from: 0, to: pixels.count, by: 4) {
-            let rgb = Array(pixels[offset..<(offset + 3)])
-            guard rgb.allSatisfy({ $0.isFinite && $0 > 0.015 && $0 < 0.95 }) else { throw FlatFieldError.invalidReference }
-            luminance.append(rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722)
+            let red = pixels[offset]
+            let green = pixels[offset + 1]
+            let blue = pixels[offset + 2]
+            for channel in [red, green, blue] {
+                if channel.isFinite {
+                    minChannel = min(minChannel, channel)
+                    maxChannel = max(maxChannel, channel)
+                    if channel <= 0.015 { dark += 1 }
+                    if channel >= 0.95 { clipped += 1 }
+                } else {
+                    nonFinite += 1
+                }
+            }
+            let value = red * 0.2126 + green * 0.7152 + blue * 0.0722
+            if value.isFinite {
+                minLuminance = min(minLuminance, value)
+                maxLuminance = max(maxLuminance, value)
+                luminance.append(value)
+            } else {
+                nonFinite += 1
+            }
+        }
+        guard nonFinite == 0, dark == 0, clipped == 0 else {
+            throw invalidReference("Diagnostics: grid \(width)x\(height); RGB range \(format(minChannel))...\(format(maxChannel)); dark channel samples \(dark); clipped channel samples \(clipped); non-finite samples \(nonFinite).")
         }
         let mean = luminance.reduce(0, +) / Float(luminance.count)
         let gains = luminance.map { mean / $0 }
-        guard gains.allSatisfy({ $0 >= 0.5 && $0 <= 2 }) else { throw FlatFieldError.invalidReference }
+        let minGain = gains.min() ?? .nan
+        let maxGain = gains.max() ?? .nan
+        guard gains.allSatisfy({ allowedGains.contains($0) }) else {
+            throw invalidReference("Diagnostics: grid \(width)x\(height); luminance range \(format(minLuminance))...\(format(maxLuminance)); mean \(format(mean)); correction gain range \(format(minGain))...\(format(maxGain)) (allowed \(format(allowedGains.lowerBound))...\(format(allowedGains.upperBound))).")
+        }
         return FlatFieldProfile(id: UUID(), reference: info, gridWidth: width, gridHeight: height, gains: gains)
     }
     static func corrected(_ source: CIImage, profile: FlatFieldProfile) throws -> CIImage {
         guard profile.version == 1, profile.gridWidth > 0, profile.gridHeight > 0,
               profile.gains.count == profile.gridWidth * profile.gridHeight,
-              profile.gains.allSatisfy({ $0.isFinite && $0 >= 0.5 && $0 <= 2 }) else { throw FlatFieldError.invalidReference }
+              profile.gains.allSatisfy({ $0.isFinite && allowedGains.contains($0) }) else { throw FlatFieldError.invalidReference() }
         let pixels = profile.gains.flatMap { [$0, $0, $0, Float(1)] }
         let data = pixels.withUnsafeBytes { Data($0) }
         let field = CIImage(bitmapData: data, bytesPerRow: profile.gridWidth * 16,
