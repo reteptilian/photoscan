@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import CoreImage
 
 struct ScanManifest: Codable {
     var schemaVersion = 1
@@ -7,6 +8,7 @@ struct ScanManifest: Codable {
     var captures: [ScanSide.RawValue: CaptureInfo]
     var flatFieldID: UUID?
     var correctedFiles: [ScanSide.RawValue: String]?
+    var grayBalanceID: UUID?
 }
 
 enum ScanArchive {
@@ -39,7 +41,16 @@ enum ScanArchive {
         }
         return profile
     }
-    static func save(_ info: CaptureInfo, data: Data, folder: URL, profile: FlatFieldProfile?) throws -> URL {
+    static func saveGrayReference(_ info: CaptureInfo, data: Data, folder: URL, target: DKCGrayTarget, selection: CGRect) throws -> GrayBalanceProfile {
+        guard ["heic", "jpg"].contains(info.fileExtension) else { throw FlatFieldError.invalidImage }
+        let profile = try GrayBalance.makeProfile(data: data, info: info, target: target, selection: selection)
+        _ = try commit(folder: folder.appendingPathComponent("_calibrations", isDirectory: true), name: profile.id.uuidString) { staging in
+            try data.write(to: staging.appendingPathComponent("reference." + info.fileExtension), options: .atomic)
+            try writeJSON(profile, to: staging.appendingPathComponent("gray-balance.json"))
+        }
+        return profile
+    }
+    static func save(_ info: CaptureInfo, data: Data, folder: URL, profile: FlatFieldProfile?, grayBalance: GrayBalanceProfile? = nil) throws -> URL {
         guard ["heic", "jpg"].contains(info.fileExtension), !data.isEmpty,
               CGImageSourceCreateWithData(data as CFData, nil) != nil else { throw FlatFieldError.invalidImage }
         let side = info.request.side.rawValue
@@ -50,10 +61,21 @@ enum ScanArchive {
         let destination = try commit(folder: folder, name: info.request.assetID.uuidString) { staging in
             try data.write(to: staging.appendingPathComponent(filename), options: .atomic)
             var manifest = ScanManifest(assetID: info.request.assetID, captures: [side: info])
-            if let profile {
+            if profile != nil || grayBalance != nil {
                 do {
-                    try FlatField.writeCorrection(data: data, info: info, profile: profile, to: staging.appendingPathComponent(corrected))
-                    manifest.flatFieldID = profile.id
+                    var output = try FlatField.image(data)
+                    if let profile {
+                        guard profile.matches(info) else { throw FlatFieldError.incompatible }
+                        output = try FlatField.corrected(output, profile: profile)
+                    }
+                    if let grayBalance {
+                        guard grayBalance.matches(info) else { throw GrayBalanceError.incompatible }
+                        output = try GrayBalance.corrected(output, profile: grayBalance)
+                    }
+                    try FlatField.context().writeTIFFRepresentation(of: output, to: staging.appendingPathComponent(corrected),
+                        format: .RGBA16, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, options: [:])
+                    manifest.flatFieldID = profile?.id
+                    manifest.grayBalanceID = grayBalance?.id
                     manifest.correctedFiles = [side: corrected]
                 } catch {
                     correctionError = error

@@ -24,6 +24,7 @@ struct ContentView: View {
                             Button(model.name(camera)) { model.connect(camera) }
                         }
                     }
+                    .disabled(model.busy)
                 }
                 Button("Archive Folder", systemImage: "folder", action: model.chooseFolder)
                     .disabled(model.busy)
@@ -70,6 +71,20 @@ struct ContentView: View {
             }
             .padding(.horizontal).padding(.vertical, 10)
             Divider()
+            HStack {
+                Button("Capture Gray Chart", systemImage: "eyedropper", action: model.captureGrayChart)
+                    .disabled(!model.connected || model.busy || model.folder == nil || model.settings?.locked != true)
+                Toggle("Gray balance", isOn: $model.applyGrayBalance)
+                    .disabled(model.grayBalance == nil || model.busy)
+                if model.grayBalance != nil {
+                    Image(systemName: "checkmark.circle").foregroundStyle(.green).help("DKC-Pro gray balance ready")
+                    Button(action: model.clearGrayBalance) { Image(systemName: "trash") }
+                        .help("Clear gray balance").disabled(model.busy)
+                }
+                Spacer()
+            }
+            .padding(.horizontal).padding(.vertical, 10)
+            Divider()
             ZStack {
                 Color(nsColor: .textBackgroundColor)
                 if let preview = model.showCorrected ? (model.correctedPreview ?? model.preview) : model.preview {
@@ -96,6 +111,9 @@ struct ContentView: View {
         }
         .frame(minWidth: 720, minHeight: 520)
         .onAppear { model.start() }
+        .sheet(item: $model.chartReference) { chart in
+            GrayChartView(chart: chart, model: model)
+        }
     }
     @ViewBuilder
     private func settingsReadout(_ settings: CameraSettings) -> some View {

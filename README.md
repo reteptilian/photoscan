@@ -43,6 +43,18 @@ References are archived under _calibrations/<profile UUID>/ with reference.heic 
 
 The algorithm smooths a low-resolution reference luminance field and multiplies subsequent images by its mean-normalized reciprocal in linear light using [Core Image](https://developer.apple.com/documentation/coreimage/cicontext/workingcolorspace). Gains outside 0.5 to 2 are rejected, as are dark or near-clipped reference samples. It preserves color ratios and average reference brightness; it does not calibrate white balance or replace a color-chart correction. Uneven paper, shadows, marks, changes to lighting, or moving the phone invalidate the reference even if camera settings still match.
 
+## DKC-Pro Gray Balance
+
+Supported chart: DGK Color Tools DKC-Pro 5 x 7 inch, with 12% and 18% neutral gray targets. This slice provides post-capture neutral white balance, not an 18-patch color matrix or a camera RAW profile. Target names record which patch was used; reflectance is not treated as an absolute output brightness.
+
+Focus on a print and lock the settings. Place the chart at the same plane under the same lighting, then press Capture Gray Chart. In the chart window, select the 12% or 18% target name and drag a rectangle wholly inside that gray patch. Use Gray Sample saves the profile. The large neutral gray reverse side can also be used as the 18% target; this is a calibration capture, not a back scan of a print. Avoid labels, patch borders, glare, and shadows.
+
+The original chart capture is archived as an asset, and the profile plus a reference copy are saved under _calibrations/<UUID>/gray-balance.json. Subsequent scans can enable Gray balance and Flat-field correction independently; processing applies flat field first, then gray balance, and writes one corrected TIFF. Metadata records both profile IDs when used. Unlocking, disconnecting, or changing the archive folder clears both active profiles. Capture a new chart after changing lighting or camera position.
+
+Sampling uses the displayed oriented image's normalized top-left selection coordinates. A linear RGB sample must be sufficiently bright, below clipping, and uniform. Mean-normalized channel gains neutralize the patch while preserving its luminance; gains beyond 0.5 to 2 are rejected. The algorithm cannot establish that a selected colored patch is neutral, so correct patch selection matters. HEIC/JPEG tone mapping limits the accuracy achievable with this method.
+
+The manufacturer describes the neutral targets in its [DKC-Pro guide](https://dgkcolor.tools/wp-content/uploads/2019/09/Complete-Guide-to-the-DKC-Pro-Color-Chart_Final.pdf). DKC-Pro reference colors are not interchangeable with a Macbeth/X-Rite ColorChecker; a future multi-patch fit must use the DKC-Pro's own reference data with a verified color-space/white-point interpretation.
+
 ## Verification
 
 Build both Xcode schemes. A physical iPhone is required to verify camera capture and local network discovery.
@@ -57,6 +69,13 @@ swiftc -parse-as-library Shared/ScanProtocol.swift Tests/ProtocolSmoke.swift -o 
 Synthetic flat-field and archive tests:
 
 ```sh
-swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/FlatFieldSmoke.swift -o /tmp/photoscan-flatfield-smoke
+swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/FlatFieldSmoke.swift -o /tmp/photoscan-flatfield-smoke
 /tmp/photoscan-flatfield-smoke
+```
+
+DKC-Pro neutral sample and combined processing tests:
+
+```sh
+swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/GrayBalanceSmoke.swift -o /tmp/photoscan-gray-smoke
+/tmp/photoscan-gray-smoke
 ```

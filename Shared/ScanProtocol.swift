@@ -16,6 +16,15 @@ struct CaptureInfo: Codable, Sendable {
     var settings: CameraSettings?
     var photoISO: Double?
     var photoExposureSeconds: Double?
+
+    func hasSameLockedSetup(as reference: CaptureInfo) -> Bool {
+        guard let a = reference.settings, let b = settings, a.locked, b.locked,
+              reference.camera == camera, reference.width == width, reference.height == height else { return false }
+        func near(_ x: Double, _ y: Double) -> Bool { abs(x - y) <= max(abs(x) * 0.01, 0.000001) }
+        return near(a.iso, b.iso) && near(a.exposureSeconds, b.exposureSeconds)
+            && abs(a.focusPosition - b.focusPosition) <= 0.002
+            && near(a.redGain, b.redGain) && near(a.greenGain, b.greenGain) && near(a.blueGain, b.blueGain)
+    }
 }
 struct CameraSettings: Codable, Equatable, Sendable {
     let locked: Bool
