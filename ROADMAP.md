@@ -31,20 +31,65 @@ See [README.md](README.md) for the current workflow, limitations, and test comma
 
 | ID | Slice | Status | Dependencies / Notes |
 | --- | --- | --- | --- |
-| S01 | Validate the current workflow | Ready | Next priority; physical iPhone and real prints |
+| S10 | Finished outputs, naming, and metadata | Ready | Next implementation priority; replace the prototype archive layout |
+| S01 | Validate the current workflow | Ready | Validate S10 with a physical iPhone and real prints |
 | S02 | Persistent calibration profiles | Planned | Build on S01 findings |
 | S03 | DKC-Pro multi-patch color correction | Waiting | Charts and verified reference data |
 | S04 | Multi-print extraction | Planned | Reliable crop workflow from S01 |
-| S05 | Efficient batch scanning | Planned | S04; archive/session decisions |
+| S05 | Efficient batch scanning | Planned | S04 and S10; archive/session decisions |
 | S06 | Metadata and OCR | Planned | Stable per-print assets |
 | S07 | Archive browsing and export | Planned | Metadata contract from S06 |
 | S08 | Front/back pairing | Planned | Optional; S04 and S05 for batch matching |
 | S09 | Reliability and packaging | Planned | Incremental fixes throughout; final release checks |
 | O01 | Live Mac preview | Planned | Optional; prioritize if phone positioning is cumbersome |
 
-The order is a default, not a strict dependency chain. S03 can proceed when its reference information is available. Reliability fixes should happen when needed rather than wait for S09.
+The order is a default, not a strict dependency chain. S10 comes first despite its ID; IDs remain stable when priorities change. S03 can proceed when its reference information is available. Reliability fixes should happen when needed rather than wait for S09.
+
+Archive compatibility policy: previously saved prototype archives do not need to remain readable. Replace obsolete code, tests, and documentation rather than adding migration, legacy readers, or compatibility branches. This does not authorize deleting existing user files.
 
 ## Slice Specifications
+
+### S10: Finished Outputs, Naming, and Metadata
+
+Goal: make the default image the finished scan, with all accepted processing and supported metadata applied, while clearly separating the untouched camera source.
+
+Proposed layout:
+
+```text
+<asset-id>/
+  <orig_doc_date>_<index>.heic
+  metadata.json
+  sources/
+    capture.heic
+```
+
+The asset ID remains the internal identity; the human-readable filename is not an identifier. Keep the original camera bytes under sources/ using their actual format/extension, including JPEG when applicable. Future multi-print assets should reference their shared source frame rather than require duplicate originals.
+
+Naming proposal: use a date token with the precision actually known, such as 1956-07-12, 1956-07, or 1956, followed by a zero-padded index. For example, 1956-07-12_000042.heic. Use unknown-date_000042.heic when the original document date is unknown; do not substitute the scan date or invent a month/day. Preserve approximate-date qualifiers in metadata. Confirm the exact token conventions before implementing the allocator.
+
+Allocate the index persistently across the archive, keeping it stable for an asset's lifetime. Check for collisions when allocating, renaming, importing, or exporting; never overwrite another asset. This improves filename uniqueness within an archive but does not promise global uniqueness across independently created archives. Changing the document date can rename the finished file while retaining its index and asset ID.
+
+Storage and processing contract:
+
+- HEIC is the default finished output. JPEG is a compatibility export; 16-bit TIFF is an optional editing/archive export, not the default crop artifact.
+- Render from the preserved source at high precision, applying the accepted luminance correction, gray balance or color correction, crop, and rotation in one pipeline. Encode the finished image once per revision, rather than processing an already-compressed final image.
+- Publish the final image after crop review is accepted or explicitly skipped. Show a pending state while processing/review is incomplete; an uncropped source must not silently stand in for a completed crop.
+- Embed supported labels, title/description, original photo/document datetime, and other supported metadata in the finished file. Add the minimal manual metadata editing needed for this slice; S06 expands the model and adds OCR.
+- Keep metadata.json authoritative for date precision/uncertainty, people, processing recipe, calibration provenance, source relationships, and fields that cannot be reliably embedded. Record the scan timestamp separately from the original document date.
+- Regenerate the finished output when accepted edits change. Update filenames, metadata, and references consistently; preserve the previous valid revision if rendering or writing fails.
+- Previews and Show in Finder should default to the finished output. Original comparison must explicitly refer to the preserved source.
+
+Acceptance criteria:
+
+- [ ] Implement the new source/final layout and a documented, collision-safe date/index naming scheme, including unknown and partial dates.
+- [ ] Produce one default HEIC with all accepted processing applied, preserving source bytes exactly.
+- [ ] Embed supported manual metadata and verify it by reading the output back, including correct original-date versus scan-date handling.
+- [ ] Make capture, crop acceptance, metadata edits, previews, and Finder actions use the same finished-output contract.
+- [ ] Verify failed regeneration, repeated edits, date changes, restart-safe index allocation, and duplicate-name handling without losing an existing valid output.
+- [ ] Remove obsolete front.heic-as-source assumptions, per-stage corrected/cropped TIFF publication, superseded archive fields, and redundant rendering/writing paths. Update tests and README to the new contract.
+- [ ] Do not implement migration or backwards compatibility for old prototype archives.
+
+Verification / progress: specified; not implemented. The current code still saves an uncropped front.heic and separate TIFF processing outputs. HEIC encoding precision, embedded metadata mappings, date token conventions, and atomic publication details must be verified during implementation.
 
 ### S01: Validate the Current Workflow
 
@@ -95,7 +140,7 @@ Verification / progress: not started. Current cropping saves one reviewed crop u
 Goal: scan a stack efficiently while keeping corrections and retakes organized.
 
 - [ ] Provide a session view with thumbnails, progress, and predictable asset naming.
-- [ ] Support retakes and rotation with an explicit policy for preserving or replacing prior versions.
+- [ ] Support retakes and rotation with an explicit policy for preserving or replacing prior versions, using S10's source/final contract.
 - [ ] Verify a complete multi-capture session, including recovery from a failed capture.
 
 Verification / progress: not started.
@@ -106,9 +151,9 @@ Goal: make scanned assets searchable and understandable without losing uncertain
 
 - [ ] Add editable titles, dates, people, and notes to a versioned metadata contract.
 - [ ] Recognize text while retaining the source and allowing correction of uncertain OCR.
-- [ ] Verify metadata persistence, older-record compatibility, and OCR editing.
+- [ ] Verify metadata persistence, finished-output metadata updates, and OCR editing.
 
-Verification / progress: not started. Define representations for approximate dates and unknown values before implementation.
+Verification / progress: not started. Build on S10's manual metadata and date-precision model. No legacy archive compatibility layer is required.
 
 ### S07: Archive Browsing and Export
 
@@ -178,7 +223,9 @@ Links to commits, tests, or supporting documents:
 
 | Date | Decision |
 | --- | --- |
-| 2026-10-07 | Preserve original captures; save processing outputs alongside them with provenance. |
+| 2026-10-07 | Preserve original camera bytes under sources/; publish one clearly named finished image with processing and supported metadata applied. |
 | 2026-10-07 | Use DKC-Pro-specific references for future color fitting; keep neutral gray balance separate. |
 | 2026-10-07 | Hold multi-patch color fitting pending reference verification; implement reviewed print cropping first. |
-| 2026-10-07 | Prioritize physical validation, then persistent profiles. |
+| 2026-10-07 | Prioritize the finished-output contract (S10), then physical validation and persistent profiles. |
+| 2026-10-07 | Plan final filenames around original document date plus a stable index; handle unknown/partial dates without substituting the scan date. |
+| 2026-10-07 | Old prototype archives need no backwards compatibility; remove obsolete code instead of maintaining migration or legacy paths. |
