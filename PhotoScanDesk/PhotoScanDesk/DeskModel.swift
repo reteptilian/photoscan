@@ -21,9 +21,11 @@ final class DeskModel: ObservableObject {
     @Published var dimensions = ""
     @Published var count = 0
     @Published var error: String?
+    @Published var settings: CameraSettings?
     private var browser: NWBrowser?
     private var peer: ScanConnection?
     private var pending: CaptureRequest?
+    private var pendingCommand: UUID?
     private var timeout: Task<Void, Never>?
 
     func start() {
@@ -52,14 +54,22 @@ final class DeskModel: ObservableObject {
         self.peer = peer
         peer.onClose = { [weak self] reason in
             self?.connected = false; self?.peer = nil
+            self?.settings = nil
             self?.finish(); self?.status = "Disconnected"; self?.error = reason
         }
         peer.onMessage = { [weak self] message, image in
             guard let self else { return }
             switch message.kind {
             case "ready": self.connected = true; self.status = "Camera ready"
+            case "settings":
+                self.settings = message.settings
+                if let commandID = message.commandID, commandID == self.pendingCommand {
+                    self.finish(); self.status = message.settings?.locked == true ? "Settings locked" : "Automatic settings"
+                }
             case "error":
-                guard message.request == self.pending else { return }
+                let captureError = message.request != nil && message.request == self.pending
+                let settingsError = message.commandID != nil && message.commandID == self.pendingCommand
+                guard captureError || settingsError else { return }
                 self.error = message.text; self.finish(); self.status = "Camera ready"
             case "photo":
                 guard let info = message.capture, info.request == self.pending else { return }
@@ -72,6 +82,19 @@ final class DeskModel: ObservableObject {
     func disconnect() {
         peer?.close()
         peer = nil; connected = false; finish()
+        settings = nil
+    }
+    func setLocked(_ locked: Bool) {
+        guard connected, !busy, settings != nil else { return }
+        let commandID = UUID()
+        pendingCommand = commandID; busy = true; error = nil
+        status = locked ? "Settling and locking settings" : "Unlocking settings"
+        peer?.send(ScanMessage(kind: locked ? "lockSettings" : "unlockSettings", commandID: commandID))
+        timeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, let self, self.pendingCommand == commandID else { return }
+            self.peer?.close("Settings command timed out. Reconnect and try again.")
+        }
     }
     func chooseFolder() {
         let panel = NSOpenPanel()
@@ -95,7 +118,7 @@ final class DeskModel: ObservableObject {
         }
     }
     private func finish() {
-        timeout?.cancel(); timeout = nil; pending = nil; busy = false
+        timeout?.cancel(); timeout = nil; pending = nil; pendingCommand = nil; busy = false
     }
     private func save(_ info: CaptureInfo, image: Data) {
         defer { finish() }

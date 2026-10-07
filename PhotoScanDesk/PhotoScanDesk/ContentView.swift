@@ -33,6 +33,23 @@ struct ContentView: View {
             }
             .padding()
             Divider()
+            HStack(alignment: .top, spacing: 16) {
+                Button(model.settings?.locked == true ? "Unlock Settings" : "Lock Settings",
+                       systemImage: model.settings?.locked == true ? "lock.open" : "lock") {
+                    model.setLocked(model.settings?.locked != true)
+                }
+                .disabled(!model.connected || model.busy || model.settings == nil)
+                if let settings = model.settings {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 16) { settingsReadout(settings) }
+                        VStack(alignment: .leading, spacing: 6) { settingsReadout(settings) }
+                    }
+                    .font(.caption).monospacedDigit()
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal).padding(.vertical, 10)
+            Divider()
             ZStack {
                 Color(nsColor: .textBackgroundColor)
                 if let preview = model.preview {
@@ -59,6 +76,14 @@ struct ContentView: View {
         }
         .frame(minWidth: 720, minHeight: 520)
         .onAppear { model.start() }
+    }
+    @ViewBuilder
+    private func settingsReadout(_ settings: CameraSettings) -> some View {
+        Text("ISO \(settings.iso, specifier: "%.0f")")
+        Text("Shutter \(settings.exposureSeconds, specifier: "%.4f") s")
+        Text("Focus \(settings.focusPosition, specifier: "%.3f")")
+        Text("WB \(settings.whiteBalanceTemperature, specifier: "%.0f") K / \(settings.whiteBalanceTint, specifier: "%.1f")")
+        Text("Max \(settings.width) x \(settings.height)")
     }
 }
 

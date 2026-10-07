@@ -13,6 +13,22 @@ struct CaptureInfo: Codable {
     let width: Int
     let height: Int
     let camera: String
+    var settings: CameraSettings?
+    var photoISO: Double?
+    var photoExposureSeconds: Double?
+}
+struct CameraSettings: Codable, Equatable, Sendable {
+    let locked: Bool
+    let iso: Double
+    let exposureSeconds: Double
+    let focusPosition: Double
+    let whiteBalanceTemperature: Double
+    let whiteBalanceTint: Double
+    let redGain: Double
+    let greenGain: Double
+    let blueGain: Double
+    let width: Int
+    let height: Int
 }
 struct ScanMessage: Codable {
     var version = 1
@@ -20,6 +36,8 @@ struct ScanMessage: Codable {
     var request: CaptureRequest?
     var capture: CaptureInfo?
     var text: String?
+    var settings: CameraSettings?
+    var commandID: UUID?
 }
 enum ScanWire {
     static let service = "_photoscan._tcp"

@@ -17,7 +17,17 @@ Shared/ScanProtocol.swift is compiled into both targets. Bonjour discovery and N
 
 Capture requests use an asset ID and a front/back role; manifests contain a dictionary of captures by role. Back capture can later reuse an existing asset ID and add a back entry. The current archive writer only creates new assets; adding back capture will also require updating an existing manifest without overwriting its front.
 
-The iPhone uses the physical main wide-angle camera with flash off and quality prioritization, requesting the largest photo dimensions supported by the active format. Actual resolution depends on the device and capture conditions. Exposure, focus, and white balance remain automatic in this slice. Preview and still orientation are portrait.
+The iPhone uses the physical main wide-angle camera with flash off and quality prioritization, requesting the largest photo dimensions supported by the active format. Actual resolution depends on the device and capture conditions. Preview and still orientation are portrait.
+
+## Camera Settings
+
+After connection, the Mac shows device ISO, exposure duration, focus position (0 to 1), white balance temperature/tint, and maximum requested resolution. Readings refresh once a second. The saved image's actual dimensions appear in the bottom bar.
+
+Lock Settings waits for autofocus, exposure, and white balance to remain settled for roughly half a second, then locks their current values. It returns an error if settling takes more than eight seconds. Unlock Settings restores continuous automatic adjustment. Capture is disabled while a settings command is pending. Locks persist until unlocked or the camera session is restarted; reconnecting reports the phone's current state.
+
+Each capture's metadata includes a device settings snapshot around capture time, including white balance RGB gains. Separate photoISO and photoExposureSeconds fields come from the processed photo's EXIF metadata when available. These may differ from preview/device readings because the phone processes still images. Focus and white balance readings are device values, not measured from the image. Existing manifests without these optional fields remain readable.
+
+Locking uses AVFoundation's [device configuration API](https://developer.apple.com/documentation/avfoundation/avcapturedevice/lockforconfiguration()); photo exposure readings use [capture metadata](https://developer.apple.com/documentation/avfoundation/avcapturephoto/metadata).
 
 This prototype uses local TCP without authentication or encryption; use it on a trusted network. Pairing and retryable delivery are future work. The phone reports transfer completion, while the Mac reports success only after saving. Failed transfers or saves require a new capture.
 
