@@ -1,5 +1,7 @@
 # PhotoScan
 
+See [ROADMAP.md](ROADMAP.md) for planned work slices, acceptance criteria, and progress.
+
 First slice: remotely capture a print's front on an iPhone and archive the original image on a Mac.
 
 ## Run
