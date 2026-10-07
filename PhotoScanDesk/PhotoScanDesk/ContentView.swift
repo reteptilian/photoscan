@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var model = DeskModel()
@@ -82,16 +83,30 @@ struct ContentView: View {
                 }
                 Spacer()
                 Button("Detect Print", systemImage: "crop", action: model.detectPrint)
-                    .disabled(model.busy || model.latestURL == nil)
+                    .disabled(model.busy || model.assetURL == nil)
             }
             .padding(.horizontal).padding(.vertical, 10)
+            HStack {
+                Button("Skip Crop Review", action: model.skipCrop).disabled(model.busy || model.assetURL == nil || model.latestURL != nil)
+                Button("Edit Metadata") { model.showMetadata = true }.disabled(model.busy || model.latestURL == nil)
+                Button("Rotate Right", action: model.rotate).disabled(model.busy || model.latestURL == nil)
+                Menu("Export") {
+                    Button("JPEG") { model.export(.jpeg) }
+                    Button("16-bit TIFF") { model.export(.tiff) }
+                }.disabled(model.busy || model.latestURL == nil)
+                Spacer()
+                Button("Reveal Source", action: model.revealSource).disabled(model.assetURL == nil)
+            }.padding(.horizontal).padding(.vertical, 8)
             Divider()
             ZStack {
                 Color(nsColor: .textBackgroundColor)
                 if let preview = model.displayedPreview {
                     Image(nsImage: preview).resizable().scaledToFit().padding(20)
                 } else {
-                    Image(systemName: "photo").font(.system(size: 64)).foregroundStyle(.tertiary)
+                    VStack {
+                        Image(systemName: "photo").font(.system(size: 64)).foregroundStyle(.tertiary)
+                        if model.assetURL != nil { Text("Finished scan pending crop review").foregroundStyle(.secondary) }
+                    }
                 }
                 if model.busy { ProgressView().padding().background(.regularMaterial) }
             }
@@ -115,6 +130,7 @@ struct ContentView: View {
         .sheet(item: $model.chartReference) { chart in
             GrayChartView(chart: chart, model: model)
         }
+        .sheet(isPresented: $model.showMetadata) { MetadataEditor(model: model) }
         .sheet(item: $model.cropReview) { review in
             CropReviewView(review: review, model: model)
         }

@@ -17,7 +17,8 @@ Statuses: **Planned**, **Ready**, **In Progress**, **Waiting**, **Done**.
 Implemented capabilities, with physical validation still incomplete:
 
 - iPhone main-camera preview and full-resolution capture triggered from the Mac.
-- Bonjour discovery, connection, image transfer, and front-only asset archives.
+- Bonjour discovery, connection, image transfer, and front-only source/finished asset archives.
+- Reviewed finished HEIC outputs, stable date/index naming, manual metadata, rotation, and JPEG/16-bit TIFF exports.
 - Remote focus, exposure, and white-balance locking with settings recorded in metadata.
 - Flat-field calibration and DKC-Pro neutral gray balance, with corrected TIFFs alongside originals.
 - Print detection, manual corner adjustment, and perspective-corrected cropping.
@@ -31,7 +32,7 @@ See [README.md](README.md) for the current workflow, limitations, and test comma
 
 | ID | Slice | Status | Dependencies / Notes |
 | --- | --- | --- | --- |
-| S10 | Finished outputs, naming, and metadata | Ready | Next implementation priority; replace the prototype archive layout |
+| S10 | Finished outputs, naming, and metadata | Done | Automated checks passed; physical workflow validation continues in S01 |
 | S01 | Validate the current workflow | Ready | Validate S10 with a physical iPhone and real prints |
 | S02 | Persistent calibration profiles | Planned | Build on S01 findings |
 | S03 | DKC-Pro multi-patch color correction | Waiting | Charts and verified reference data |
@@ -53,7 +54,7 @@ Archive compatibility policy: previously saved prototype archives do not need to
 
 Goal: make the default image the finished scan, with all accepted processing and supported metadata applied, while clearly separating the untouched camera source.
 
-Proposed layout:
+Implemented layout:
 
 ```text
 <asset-id>/
@@ -65,7 +66,7 @@ Proposed layout:
 
 The asset ID remains the internal identity; the human-readable filename is not an identifier. Keep the original camera bytes under sources/ using their actual format/extension, including JPEG when applicable. Future multi-print assets should reference their shared source frame rather than require duplicate originals.
 
-Naming proposal: use a date token with the precision actually known, such as 1956-07-12, 1956-07, or 1956, followed by a zero-padded index. For example, 1956-07-12_000042.heic. Use unknown-date_000042.heic when the original document date is unknown; do not substitute the scan date or invent a month/day. Preserve approximate-date qualifiers in metadata. Confirm the exact token conventions before implementing the allocator.
+Naming scheme (user-confirmed 2026-10-07): use a date token with the precision actually known, such as 1956-07-12, 1956-07, or 1956, followed by a zero-padded index. For example, 1956-07-12_000042.heic. Use unknown-date_000042.heic when the original document date is unknown; do not substitute the scan date or invent a month/day. Preserve approximate-date qualifiers in metadata. Indices start at 1 and are padded to at least six digits; larger indices retain all digits.
 
 Allocate the index persistently across the archive, keeping it stable for an asset's lifetime. Check for collisions when allocating, renaming, importing, or exporting; never overwrite another asset. This improves filename uniqueness within an archive but does not promise global uniqueness across independently created archives. Changing the document date can rename the finished file while retaining its index and asset ID.
 
@@ -81,15 +82,19 @@ Storage and processing contract:
 
 Acceptance criteria:
 
-- [ ] Implement the new source/final layout and a documented, collision-safe date/index naming scheme, including unknown and partial dates.
-- [ ] Produce one default HEIC with all accepted processing applied, preserving source bytes exactly.
-- [ ] Embed supported manual metadata and verify it by reading the output back, including correct original-date versus scan-date handling.
-- [ ] Make capture, crop acceptance, metadata edits, previews, and Finder actions use the same finished-output contract.
-- [ ] Verify failed regeneration, repeated edits, date changes, restart-safe index allocation, and duplicate-name handling without losing an existing valid output.
-- [ ] Remove obsolete front.heic-as-source assumptions, per-stage corrected/cropped TIFF publication, superseded archive fields, and redundant rendering/writing paths. Update tests and README to the new contract.
-- [ ] Do not implement migration or backwards compatibility for old prototype archives.
+- [x] Implement the new source/final layout and a documented, collision-safe date/index naming scheme, including unknown and partial dates.
+- [x] Produce one default HEIC with all accepted processing applied, preserving source bytes exactly.
+- [x] Embed supported manual metadata and verify it by reading the output back, including correct original-date versus scan-date handling.
+- [x] Make capture, crop acceptance, metadata edits, previews, and Finder actions use the same finished-output contract.
+- [x] Verify failed regeneration, repeated edits, date changes, restart-safe index allocation, and duplicate-name handling without losing an existing valid output.
+- [x] Remove obsolete front.heic-as-source assumptions, per-stage corrected/cropped TIFF publication, superseded archive fields, and redundant rendering/writing paths. Update tests and README to the new contract.
+- [x] Do not implement migration or backwards compatibility for old prototype archives.
 
-Verification / progress: specified; not implemented. The current code still saves an uncropped front.heic and separate TIFF processing outputs. HEIC encoding precision, embedded metadata mappings, date token conventions, and atomic publication details must be verified during implementation.
+Verification / progress (2026-10-07): implemented and verified by automated macOS checks. Both Xcode schemes build (Mac Debug and generic iOS device, signing disabled). ProtocolSmoke, FlatFieldSmoke, GrayBalanceSmoke, PrintCropSmoke, and [FinishedOutputSmoke](Tests/FinishedOutputSmoke.swift) pass. Tests cover source byte preservation for JPEG and HEIC, combined calibration/crop behavior, orientation/dimensions, metadata readback/removal, unknown/partial/approximate/full dates, repeated edits/renames, failed rendering and blocked writes, duplicate IDs/indices/names, fresh concurrent process allocation after restart, and JPEG/16-bit TIFF exports. Integration of capture, acceptance/skip, metadata editing, previews, and Finder actions is implemented and compiled; physical UI/camera validation remains S01.
+
+HEIC storage depth reads back as 10 bits on the tested Mac; processing is floating-point linear light with one 16-bit rasterization before encoding. IPTC title, description, and keywords and EXIF exact original datetime round-trip. ImageIO dropped standalone IPTC DateCreated during HEIC verification, so date-only/partial/approximate values remain authoritative in JSON; no invented time or scan date is embedded. People, uncertainty, complete calibration provenance, and the recipe also remain in JSON.
+
+Publication uses an archive process lock and an atomic macOS directory exchange after staged rendering/metadata verification. Previous valid revisions survive failures. External/network volumes, power-loss durability, crash-staging cleanup, physical print accuracy, and Apple Photos metadata import remain unverified. Pending assets persist on disk but reopening them in the UI belongs to S07. No prototype migration or compatibility code was added. See [README.md](README.md) for the workflow, metadata contract, and verification commands.
 
 ### S01: Validate the Current Workflow
 
@@ -229,3 +234,5 @@ Links to commits, tests, or supporting documents:
 | 2026-10-07 | Prioritize the finished-output contract (S10), then physical validation and persistent profiles. |
 | 2026-10-07 | Plan final filenames around original document date plus a stable index; handle unknown/partial dates without substituting the scan date. |
 | 2026-10-07 | Old prototype archives need no backwards compatibility; remove obsolete code instead of maintaining migration or legacy paths. |
+| 2026-10-07 | Confirm YYYY-MM-DD / YYYY-MM / YYYY / unknown-date tokens with an archive-wide index padded to at least six digits; preserve approximate qualifiers in JSON. |
+| 2026-10-07 | Publish only after accepted/skipped crop review; encode one HEIC from the preserved source and recipe, then atomically exchange the asset directory. Embed exact original datetime only when time is supplied; date-only/partial/uncertain dates remain in JSON after standalone IPTC date failed HEIC readback. |

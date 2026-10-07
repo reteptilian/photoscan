@@ -53,23 +53,26 @@ struct FlatFieldSmoke {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let savedProfile = try ScanArchive.saveReference(info, data: encoded, folder: folder)
-        let original = try ScanArchive.save(info, data: encoded, folder: folder, profile: savedProfile)
-        let originalBytes = try Data(contentsOf: original)
-        precondition(originalBytes == encoded, "Original bytes must remain unchanged")
-        let correctedURL = original.deletingLastPathComponent().appendingPathComponent("front-corrected.tiff")
-        precondition(FileManager.default.fileExists(atPath: correctedURL.path))
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(ScanManifest.self, from: Data(contentsOf: original.deletingLastPathComponent().appendingPathComponent("metadata.json")))
-        precondition(manifest.flatFieldID == savedProfile.id && manifest.correctedFiles?["front"] == "front-corrected.tiff")
+        let asset = try ScanArchive.save(info, data: encoded, folder: folder, profile: savedProfile)
+        let originalBytes = try Data(contentsOf: asset.appendingPathComponent("sources/capture.jpg"))
+        precondition(originalBytes == encoded)
+        var manifest = try ScanArchive.read(asset)
+        precondition(manifest.recipe.flatField?.id == savedProfile.id && manifest.finished == nil)
+        manifest.recipe.cropReviewed = true
+        let finishedURL = try ScanArchive.regenerate(asset: asset, recipe: manifest.recipe)
+        precondition(FileManager.default.fileExists(atPath: finishedURL.path))
         mismatch = CaptureInfo(request: CaptureRequest(assetID: UUID(), side: .front), capturedAt: Date(),
             fileExtension: "jpg", width: width + 1, height: height, camera: "Main", settings: settings)
+        let pending = try ScanArchive.save(mismatch, data: encoded, folder: folder, profile: savedProfile)
+        var recipe = try ScanArchive.read(pending).recipe; recipe.cropReviewed = true
         do {
-            _ = try ScanArchive.save(mismatch, data: encoded, folder: folder, profile: savedProfile)
+            _ = try ScanArchive.regenerate(asset: pending, recipe: recipe)
             fatalError("Accepted an incompatible reference")
-        } catch let failure as SavedOriginalError {
-            let preserved = try Data(contentsOf: failure.url)
-            precondition(preserved == encoded, "Correction failure must preserve the original")
-        }
+        } catch FlatFieldError.incompatible {}
+        let preserved = try Data(contentsOf: pending.appendingPathComponent("sources/capture.jpg"))
+        precondition(preserved == encoded)
+        let failed = try ScanArchive.read(pending)
+        precondition(failed.finished == nil)
         print("Flat-field correction and archive tests passed")
     }
 }

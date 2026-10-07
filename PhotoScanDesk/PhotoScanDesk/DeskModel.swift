@@ -1,18 +1,19 @@
 import AppKit
 import Combine
 import ImageIO
+import CoreImage
 import Network
+import UniformTypeIdentifiers
 
 struct ChartReference: Identifiable {
     let info: CaptureInfo
     let data: Data
     var id: UUID { info.request.assetID }
 }
-enum ScanPreview: String, CaseIterable { case original = "Original", corrected = "Corrected", cropped = "Cropped" }
+enum ScanPreview: String, CaseIterable { case finished = "Finished", original = "Source" }
 struct CropReview: Identifiable {
     let id = UUID()
-    let originalURL: URL
-    let sourceURL: URL
+    let assetURL: URL
     let candidates: [PrintBoundary]
     let preview: CGImage
 }
@@ -32,20 +33,15 @@ final class DeskModel: ObservableObject {
     @Published var settings: CameraSettings?
     @Published var flatField: FlatFieldProfile?
     @Published var applyCorrection = true
-    @Published var previewMode: ScanPreview = .corrected
-    @Published var correctedPreview: NSImage?
-    @Published var croppedPreview: NSImage?
-    @Published var croppedDimensions = ""
+    @Published var previewMode: ScanPreview = .finished
+    @Published var finishedPreview: NSImage?
     @Published var cropReview: CropReview?
-    private var croppedURL: URL?
-    var displayedPreview: NSImage? {
-        switch previewMode {
-        case .original: preview
-        case .corrected: correctedPreview ?? preview
-        case .cropped: croppedPreview ?? preview
-        }
-    }
-    var displayedDimensions: String { previewMode == .cropped && croppedPreview != nil ? croppedDimensions : dimensions }
+    @Published var assetURL: URL?
+    @Published var document = DocumentMetadata()
+    @Published var showMetadata = false
+    @Published var finishedDimensions = ""
+    var displayedPreview: NSImage? { previewMode == .original ? preview : finishedPreview }
+    var displayedDimensions: String { previewMode == .original ? dimensions : finishedDimensions }
     @Published var grayBalance: GrayBalanceProfile?
     @Published var applyGrayBalance = true
     @Published var chartReference: ChartReference?
@@ -155,7 +151,7 @@ final class DeskModel: ObservableObject {
         beginCapture(reference: false, chart: true)
     }
     private func beginCapture(reference: Bool, chart: Bool = false) {
-        guard connected, !busy, folder != nil else { return }
+        guard connected, !busy, cropReview == nil, folder != nil else { return }
         referenceCapture = reference
         chartCapture = chart
         let request = CaptureRequest(assetID: UUID(), side: .front)
@@ -185,6 +181,7 @@ final class DeskModel: ObservableObject {
                     if reference {
                         return .success((nil, try ScanArchive.saveReference(info, data: image, folder: folder)))
                     }
+                    if chart { return .success((nil, nil)) }
                     return .success((try ScanArchive.save(info, data: image, folder: folder, profile: profile, grayBalance: balance), nil))
                 } catch { return .failure(error) }
             }.value
@@ -194,74 +191,90 @@ final class DeskModel: ObservableObject {
                 if let calibration {
                     if connected && settings?.locked == true { flatField = calibration }
                     status = "Flat field saved"
+                } else if chart {
+                    if connected && settings?.locked == true { chartReference = ChartReference(info: info, data: image) }
+                    status = "Select the neutral gray patch"
                 } else if let url {
-                    displaySaved(url, image: image, info: info)
-                    status = "Saved"
-                    if chart && connected && settings?.locked == true {
-                        chartReference = ChartReference(info: info, data: image)
-                    }
+                    assetURL = url; latestURL = nil; finishedPreview = nil; finishedDimensions = ""
+                    document = DocumentMetadata(); previewMode = .finished
+                    preview = NSImage(data: image); dimensions = "\(info.width) x \(info.height)"; count += 1
+                    status = "Source saved; crop review pending"
+                    detectPrint()
                 }
-            case .failure(let saved as SavedOriginalError):
-                displaySaved(saved.url, image: image, info: info)
-                error = saved.localizedDescription; status = "Original saved"
             case .failure(let failure):
                 error = failure.localizedDescription; status = "Save failed"
             }
         }
-    }
-    private func displaySaved(_ url: URL, image: Data, info: CaptureInfo) {
-        croppedPreview = nil; croppedURL = nil; croppedDimensions = ""; previewMode = .corrected
-        latestURL = url; preview = NSImage(data: image)
-        correctedPreview = NSImage(contentsOf: url.deletingLastPathComponent().appendingPathComponent(info.request.side.rawValue + "-corrected.tiff"))
-        dimensions = "\(info.width) x \(info.height)"; count += 1
     }
     func clearFlatField() {
         flatField = nil
     }
     func clearGrayBalance() { grayBalance = nil }
     func detectPrint() {
-        guard !busy, let originalURL = latestURL else { return }
-        let corrected = originalURL.deletingLastPathComponent().appendingPathComponent(originalURL.deletingPathExtension().lastPathComponent + "-corrected.tiff")
-        let sourceURL = FileManager.default.fileExists(atPath: corrected.path) ? corrected : originalURL
+        guard !busy, let assetURL else { return }
         busy = true; processing = true; error = nil; status = "Detecting print"
         Task {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<([PrintBoundary], CGImage), Error> in
                 do {
-                    let preview = try PrintCrop.reviewPreview(url: sourceURL)
-                    let candidates = try PrintCrop.detect(PrintCrop.image(url: sourceURL))
-                    return .success((candidates, preview))
-                }
-                catch { return .failure(error) }
+                    let manifest = try ScanArchive.read(assetURL)
+                    let preview = try ScanArchive.previewImage(manifest, asset: assetURL)
+                    return .success((try PrintCrop.detect(CoreImage.CIImage(cgImage: preview)), preview))
+                } catch { return .failure(error) }
             }.value
             processing = false; finish()
             switch result {
             case .success(let (candidates, preview)):
-                cropReview = CropReview(originalURL: originalURL, sourceURL: sourceURL, candidates: candidates, preview: preview)
+                cropReview = CropReview(assetURL: assetURL, candidates: candidates, preview: preview)
                 status = candidates.isEmpty ? "No boundary detected; manual crop available" : "Review print boundary"
-            case .failure(let failure): error = failure.localizedDescription; status = "Detection failed"
+            case .failure(let failure): error = failure.localizedDescription; status = "Review pending; detection failed"
             }
         }
     }
-    func saveCrop(_ boundary: PrintBoundary) {
-        guard !busy, let review = cropReview else { return }
-        busy = true; processing = true; error = nil; status = "Saving crop"
+    func saveCrop(_ boundary: PrintBoundary) { publish(crop: boundary, review: true) }
+    func skipCrop() { publish(crop: nil, review: true) }
+    func saveMetadata(_ draft: DocumentMetadata) { publish(metadata: draft) }
+    func rotate() {
+        guard let assetURL, let manifest = try? ScanArchive.read(assetURL) else { return }
+        publish(turns: manifest.recipe.quarterTurns + 1)
+    }
+    private func publish(crop: PrintBoundary? = nil, review: Bool = false, metadata: DocumentMetadata? = nil, turns: Int? = nil) {
+        guard !busy, let assetURL else { return }
+        busy = true; processing = true; error = nil; status = "Rendering finished scan"
         Task {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
-                do { return .success(try PrintCrop.save(originalURL: review.originalURL, sourceURL: review.sourceURL, boundary: boundary)) }
-                catch { return .failure(error) }
+                do {
+                    var recipe = try ScanArchive.read(assetURL).recipe
+                    if review { recipe.crop = crop; recipe.cropReviewed = true }
+                    if let turns { recipe.quarterTurns = turns }
+                    return .success(try ScanArchive.regenerate(asset: assetURL, document: metadata, recipe: recipe))
+                } catch { return .failure(error) }
             }.value
             processing = false; finish()
             switch result {
             case .success(let url):
-                croppedURL = url; croppedPreview = NSImage(contentsOf: url); previewMode = .cropped
-                if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                   let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
-                   let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
-                   let height = properties[kCGImagePropertyPixelHeight as String] as? Int {
-                    croppedDimensions = "\(width) x \(height)"
+                latestURL = url; finishedPreview = NSImage(contentsOf: url); previewMode = .finished
+                if let manifest = try? ScanArchive.read(assetURL), let final = manifest.finished {
+                    document = manifest.document; finishedDimensions = "\(final.width) x \(final.height)"
                 }
-                cropReview = nil; status = "Crop saved"
-            case .failure(let failure): error = failure.localizedDescription; status = "Crop failed"
+                cropReview = nil; showMetadata = false; status = "Finished scan saved"
+            case .failure(let failure): error = failure.localizedDescription; status = latestURL == nil ? "Source saved; finish pending" : "Previous finished revision preserved"
+            }
+        }
+    }
+    func export(_ type: UTType) {
+        guard !busy, let assetURL, let latestURL else { return }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [type]
+        panel.nameFieldStringValue = latestURL.deletingPathExtension().lastPathComponent + (type == .jpeg ? ".jpg" : ".tiff")
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        busy = true; processing = true; error = nil
+        Task {
+            let result = await Task.detached { () -> Result<Void, Error> in
+                Result { try ScanArchive.export(asset: assetURL, to: destination, type: type) }
+            }.value
+            processing = false; finish()
+            switch result {
+            case .success: status = "Export saved"
+            case .failure(let failure): error = failure.localizedDescription
             }
         }
     }
@@ -283,8 +296,11 @@ final class DeskModel: ObservableObject {
         }
     }
     func reveal() {
-        let url = previewMode == .cropped ? (croppedURL ?? latestURL) : latestURL
-        if let url { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        if let latestURL { NSWorkspace.shared.activateFileViewerSelecting([latestURL]) }
+    }
+    func revealSource() {
+        guard let assetURL, let manifest = try? ScanArchive.read(assetURL) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([assetURL.appendingPathComponent(manifest.sourceFile)])
     }
     func name(_ camera: NWBrowser.Result) -> String {
         if case .service(let name, _, _, _) = camera.endpoint { return name }

@@ -64,10 +64,11 @@ struct CropReviewView: View {
             if let error = model.error { Text(error).foregroundStyle(.red).padding() }
             HStack {
                 Button("Cancel") { model.cropReview = nil }.disabled(model.busy)
+                Button("Skip Crop", action: model.skipCrop).disabled(model.busy)
                 Text("Edges trim slightly inside the boundary.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
-                Button("Save Crop", systemImage: "crop") { model.saveCrop(boundary) }
+                Button("Accept Crop", systemImage: "crop") { model.saveCrop(boundary) }
                     .disabled(model.busy || !boundary.valid).keyboardShortcut(.defaultAction)
             }
             .padding()

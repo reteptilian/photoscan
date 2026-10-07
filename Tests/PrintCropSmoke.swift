@@ -74,34 +74,32 @@ struct PrintCropSmoke {
         defer { try? FileManager.default.removeItem(at: folder) }
         let data = FlatField.context().jpegRepresentation(of: source, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, options: [:])!
         let info = CaptureInfo(request: CaptureRequest(assetID: UUID(), side: .front), capturedAt: Date(), fileExtension: "jpg", width: 1000, height: 800, camera: "Main")
-        let original = try ScanArchive.save(info, data: data, folder: folder, profile: nil)
-        let correctedURL = original.deletingLastPathComponent().appendingPathComponent("front-corrected.tiff")
-        try FlatField.context().writeTIFFRepresentation(of: source, to: correctedURL, format: .RGBA16,
-            colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, options: [:])
-        let preview = try PrintCrop.reviewPreview(url: correctedURL)
+        let asset = try ScanArchive.save(info, data: data, folder: folder, profile: nil)
+        var manifest = try ScanArchive.read(asset)
+        let preview = try ScanArchive.previewImage(manifest, asset: asset)
         precondition(preview.width == 1000 && preview.height == 800)
         precondition(preview.bitsPerComponent == 8 && preview.bitsPerPixel == 32)
-        precondition(preview.alphaInfo == .premultipliedLast, "Review uses an already decoded RGBA bitmap")
         let previewTop = color(CIImage(cgImage: preview), region: CGRect(x: 300, y: 610, width: 100, height: 10))
         let previewBottom = color(CIImage(cgImage: preview), region: CGRect(x: 300, y: 170, width: 100, height: 10))
-        precondition(previewTop[0] > 0.9 && previewBottom[2] > 0.9, "Review preserves source orientation")
-        let output = try PrintCrop.save(originalURL: original, sourceURL: correctedURL, boundary: boundary)
-        let originalBytes = try Data(contentsOf: original)
+        precondition(previewTop[0] > 0.9 && previewBottom[2] > 0.9)
+        manifest.recipe.crop = boundary; manifest.recipe.cropReviewed = true
+        let output = try ScanArchive.regenerate(asset: asset, recipe: manifest.recipe)
+        let originalBytes = try Data(contentsOf: asset.appendingPathComponent("sources/capture.jpg"))
         precondition(originalBytes == data)
-        precondition(FileManager.default.fileExists(atPath: correctedURL.path))
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        let metadataURL = original.deletingLastPathComponent().appendingPathComponent("metadata.json")
-        let manifest = try decoder.decode(ScanManifest.self, from: Data(contentsOf: metadataURL))
-        precondition(manifest.crops?["front"]?.outputFile == output.lastPathComponent)
-        precondition(manifest.crops?["front"]?.sourceFile == correctedURL.lastPathComponent)
-        precondition(manifest.captures["front"]?.request == info.request)
-        let before = try Data(contentsOf: metadataURL)
+        manifest = try ScanArchive.read(asset)
+        precondition(manifest.finished?.filename == output.lastPathComponent)
+        precondition(manifest.recipe.crop == boundary && manifest.capture.request == info.request)
+        precondition(abs(manifest.finished!.width - 576) < 2 && abs(manifest.finished!.height - 456) < 2)
+        let before = try Data(contentsOf: asset.appendingPathComponent("metadata.json"))
+        let finishedBytes = try Data(contentsOf: output)
+        var invalid = manifest.recipe; invalid.crop = crossed
         do {
-            _ = try PrintCrop.save(originalURL: original, sourceURL: correctedURL, boundary: crossed)
+            _ = try ScanArchive.regenerate(asset: asset, recipe: invalid)
             fatalError("Accepted a crossed boundary")
         } catch PrintCropError.invalidBoundary {}
-        let after = try Data(contentsOf: metadataURL)
-        precondition(before == after, "Invalid crop must not alter metadata")
+        let after = try Data(contentsOf: asset.appendingPathComponent("metadata.json"))
+        let afterOutput = try Data(contentsOf: output)
+        precondition(before == after && finishedBytes == afterOutput)
         print("Print detection, perspective, orientation and archive tests passed")
     }
 }

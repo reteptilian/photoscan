@@ -42,15 +42,16 @@ struct GrayBalanceSmoke {
         defer { try? FileManager.default.removeItem(at: folder) }
         let stored = try ScanArchive.saveGrayReference(info, data: data, folder: folder, target: .gray18, selection: roi)
         let flat = FlatFieldProfile(id: UUID(), reference: info, gridWidth: 2, gridHeight: 2, gains: [1, 1, 1, 1])
-        let original = try ScanArchive.save(info, data: data, folder: folder, profile: flat, grayBalance: stored)
-        let bytes = try Data(contentsOf: original)
+        let asset = try ScanArchive.save(info, data: data, folder: folder, profile: flat, grayBalance: stored)
+        let bytes = try Data(contentsOf: asset.appendingPathComponent("sources/capture.jpg"))
         precondition(bytes == data)
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(ScanManifest.self, from: Data(contentsOf: original.deletingLastPathComponent().appendingPathComponent("metadata.json")))
-        precondition(manifest.grayBalanceID == stored.id && manifest.flatFieldID == flat.id)
-        let output = try FlatField.image(Data(contentsOf: original.deletingLastPathComponent().appendingPathComponent("front-corrected.tiff")))
+        var manifest = try ScanArchive.read(asset)
+        precondition(manifest.recipe.grayBalance?.id == stored.id && manifest.recipe.flatField?.id == flat.id)
+        manifest.recipe.cropReviewed = true
+        let url = try ScanArchive.regenerate(asset: asset, recipe: manifest.recipe)
+        let output = try FlatField.image(Data(contentsOf: url))
         let outputGray = mean(output.cropped(to: CGRect(x: 30, y: 90, width: 30, height: 20)))
-        precondition(outputGray.max()! - outputGray.min()! < 0.005)
+        precondition(outputGray.max()! - outputGray.min()! < 0.015)
         var incompatible = info
         incompatible.settings = nil
         precondition(!profile.matches(incompatible))

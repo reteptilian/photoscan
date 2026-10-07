@@ -1,100 +1,97 @@
 # PhotoScan
 
-See [ROADMAP.md](ROADMAP.md) for planned work slices, acceptance criteria, and progress.
+See [ROADMAP.md](ROADMAP.md) for work slices, acceptance criteria, and progress.
 
-First slice: remotely capture a print's front on an iPhone and archive the original image on a Mac.
+PhotoScan remotely captures a print on an iPhone, preserves the camera source on a Mac, and publishes a finished scan after crop review.
 
 ## Run
 
 1. Open each Xcode project. Run PhotoScanCamera on a physical iPhone and PhotoScanDesk on the Mac.
-2. Allow Camera and Local Network access. Keep the iPhone app in the foreground, preferably with both devices on the same Wi-Fi network.
+2. Allow Camera and Local Network access. Keep the iPhone app in the foreground with both devices on the same Wi-Fi network.
 3. On the Mac, choose an Archive Folder, then choose the phone from Cameras.
-4. Press Capture. After transfer, the image appears on the Mac and Show in Finder opens its saved location.
+4. Press Capture. The source is saved first and print boundary review opens automatically. Adjust the corners and Accept Crop, or explicitly Skip Crop. Cancel leaves the scan pending; Detect Print reopens review, and Skip Crop Review publishes the full frame.
+5. Edit Metadata to add the original document date, title, description, labels, and people. Rotate Right changes the finished orientation. Accepted changes regenerate the finished image from the source.
+6. Finished is the default preview. Source explicitly compares the untouched camera image. Show in Finder always reveals the finished HEIC; Reveal Source opens the camera source. Export offers JPEG and 16-bit TIFF without replacing existing files.
 
-Each capture creates an asset UUID folder containing front.heic (or front.jpg when HEVC is unavailable) and metadata.json. Original image bytes are preserved, including embedded camera metadata. The manifest records the actual dimensions, capture time, camera, asset ID, and side.
+A pending scan has no finished preview or finished Finder action. If processing fails, the source remains saved. If regeneration fails, the previous finished preview, filename, and manifest remain valid. A pending scan cannot currently be reopened after app restart through the UI; archive browsing is S07.
 
-## Design
+## Archive and Names
 
-Shared/ScanProtocol.swift is compiled into both targets. Bonjour discovery and Network.framework TCP carry versioned, length-prefixed JSON headers followed by original binary image data, bounded to 100 MiB per message. One Mac connects at a time. Disconnects and a 60-second capture timeout clear the pending request.
+```text
+<archive>/
+  .archive.lock
+  .next-index.json
+  <asset UUID>/
+    unknown-date_000001.heic
+    metadata.json
+    sources/
+      capture.heic              # capture.jpg for actual JPEG sources
+  _calibrations/
+    <profile UUID>/
+      reference.heic            # or reference.jpg
+      profile.json             # flat field
+      gray-balance.json         # gray balance, in its own profile directory
+```
 
-Capture requests use an asset ID and a front/back role; manifests contain a dictionary of captures by role. Back capture can later reuse an existing asset ID and add a back entry. The current archive writer only creates new assets; adding back capture will also require updating an existing manifest without overwriting its front.
+The UUID is the asset identity. Source bytes, including their camera metadata, remain exactly as received. HEIC is the default finished output; there are no separate corrected or cropped TIFF artifacts. A pending asset contains only sources/ and metadata.json.
 
-The iPhone uses the physical main wide-angle camera with flash off and quality prioritization, requesting the largest photo dimensions supported by the active format. Actual resolution depends on the device and capture conditions. Preview and still orientation are portrait.
+Names use the original document date's actual precision: `1956-07-12_000042.heic`, `1956-07_000042.heic`, `1956_000042.heic`, or `unknown-date_000042.heic`. Indices start at 1, are padded to at least six digits, and remain stable through date edits. Approximate dates use the same token and retain their qualifier in metadata. Unknown dates never use the scan date. Gregorian dates are validated, including leap days; optional original time uses `HH:mm:ss` and requires an exact full day.
 
-## Camera Settings
+An archive-wide advisory process lock serializes writers. The allocator persists its next index before saving and checks existing asset manifests as well, so restarts and imported higher indices do not reuse an index. Failed saves may leave gaps. Duplicate asset IDs, indices, and destination filenames block writes. Indices are unique within an archive, not globally across independent archives. There is no import UI yet; manually introducing conflicting records will prevent their regeneration. Keep unrelated files outside asset directories.
 
-After connection, the Mac shows device ISO, exposure duration, focus position (0 to 1), white balance temperature/tint, and maximum requested resolution. Readings refresh once a second. The saved image's actual dimensions appear in the bottom bar.
+Schema 2 metadata.json is authoritative. It records the UUID, stable index, capture/scan timestamp and camera settings, relative source relationship, document fields (including partial/uncertain dates and people), accepted recipe, complete calibration profiles with reference provenance, crop corners, quarter-turn rotation, and finished dimensions/revision/filename. The recipe keeps the calibration used at capture time; clearing or replacing an active calibration affects subsequent captures. A future multi-print source relationship can reference a shared frame instead of copying it for every print.
 
-Lock Settings waits for autofocus, exposure, and white balance to remain settled for roughly half a second, then locks their current values. It returns an error if settling takes more than eight seconds. Unlock Settings restores continuous automatic adjustment. Capture is disabled while a settings command is pending. Locks persist until unlocked or the camera session is restarted; reconnecting reports the phone's current state.
+Supported embedded metadata: IPTC ObjectName (title), CaptionAbstract (description/notes), Keywords (labels). EXIF DateTimeOriginal is written only when both an exact original day and original time are supplied. Day-only, partial, and approximate dates remain in metadata.json without an invented midnight. ImageIO dropped standalone IPTC DateCreated in the HEIC readback test, so this field is not treated as a supported embedding. No camera scan datetime is copied into the finished image's original-date fields. People and uncertainty remain in JSON. Metadata is read back and verified before publication, including removal of a previously supplied original datetime.
 
-Each capture's metadata includes a device settings snapshot around capture time, including white balance RGB gains. Separate photoISO and photoExposureSeconds fields come from the processed photo's EXIF metadata when available. These may differ from preview/device readings because the phone processes still images. Focus and white balance readings are device values, not measured from the image. Existing manifests without these optional fields remain readable.
+Processing decodes the oriented source into a floating-point linear-light pipeline, applies flat field, gray balance, perspective crop/edge trim, and rotation, then rasterizes once at 16-bit precision and encodes once per revision. The tested macOS HEIC encoder produces **10-bit** output from this input; JPEG is a lossy compatibility export and TIFF retains 16 bits. Exports also render from the source and accepted recipe rather than recompressing the finished HEIC.
 
-Locking uses AVFoundation's [device configuration API](https://developer.apple.com/documentation/avfoundation/avcapturedevice/lockforconfiguration()); photo exposure readings use [capture metadata](https://developer.apple.com/documentation/avfoundation/avcapturephoto/metadata).
+Regeneration copies the asset into a hidden staging directory, renders and verifies the image and metadata there, then atomically swaps the entire asset directory with macOS `RENAME_SWAP`. The previous directory is removed only after a successful swap. Readers see a complete previous or new revision; failure leaves the previous directory intact. This requires a filesystem supporting atomic directory exchange (verified on the local filesystem; external/network archive volumes are unverified). A failed exchange preserves the previous revision. Interrupted staging directories may remain hidden; crash cleanup and power-loss durability are future reliability work. Do not modify an archive concurrently using software that ignores its lock.
 
-This prototype uses local TCP without authentication or encryption; use it on a trusted network. Pairing and retryable delivery are future work. The phone reports transfer completion, while the Mac reports success only after saving. Failed transfers or saves require a new capture.
+Prototype archives are unsupported. Use a new archive folder; there is no migration, compatibility reader, or deletion of old user files.
 
-Archive folder selection lasts for the current app session. Images are committed with their manifest by renaming a staging directory; partial writes are not reported as saved.
+## Capture and Camera Settings
 
-## Flat-Field Calibration
+Shared/ScanProtocol.swift is compiled into both targets. Bonjour discovery and Network.framework TCP carry versioned, length-prefixed JSON headers followed by original image data, bounded to 100 MiB per message. One Mac connects at a time. Disconnects and a 60-second capture timeout clear pending requests. Capture requests carry asset ID and front/back role, but this workflow creates one front asset per capture; pairing is future work.
 
-With the phone and lights fixed in their scanning positions, focus on a print and Lock Settings. Replace it with a blank matte neutral sheet at the same height, filling the frame. Choose the archive folder, then press Capture Flat Field. Keep the sheet below clipping: an overexposed white sheet cannot measure lighting variation. A moderately bright gray sheet works well.
+The iPhone uses the physical main wide-angle camera with flash off and quality prioritization, requesting the largest photo dimensions supported by the active format. Actual resolution depends on device and conditions. Preview and still orientation are portrait.
 
-Replace the sheet with a print without moving the camera or lights. With Flat-field correction enabled, Capture saves the original plus front-corrected.tiff, a 16-bit sRGB TIFF. The Original/Corrected selector switches the preview. Correction runs in the background; the original is still saved if correction fails.
+The Mac shows ISO, exposure, focus, white balance temperature/tint, and requested maximum dimensions. Lock Settings waits for autofocus, exposure, and white balance to settle for roughly half a second, then locks them. Settling times out after eight seconds. Unlock Settings restores automatic adjustment. Capture is disabled while a command is pending. Reconnecting reports the phone's current lock state.
 
-References are archived under _calibrations/<profile UUID>/ with reference.heic (or .jpg) and profile.json. Each corrected scan's metadata records the profile UUID and corrected filename. The active reference lasts for the current connection and archive folder; unlocking, disconnecting, or choosing a folder clears it. Recapture after restarting either app. Existing profiles are retained as provenance; loading them is not yet implemented.
+Capture metadata records a device settings snapshot, including white balance gains. Optional photoISO and photoExposureSeconds come from the processed photo's EXIF and can differ from preview readings. Focus and white balance are device values. Locking uses AVFoundation's [device configuration API](https://developer.apple.com/documentation/avfoundation/avcapturedevice/lockforconfiguration/); exposure readings use [capture metadata](https://developer.apple.com/documentation/avfoundation/avcapturephoto/metadata).
 
-The algorithm smooths a low-resolution reference luminance field and multiplies subsequent images by its mean-normalized reciprocal in linear light using [Core Image](https://developer.apple.com/documentation/coreimage/cicontext/workingcolorspace). Gains outside 0.25 to 4 are rejected, as are dark or near-clipped reference samples. This permits testing with uneven lighting, but stronger gains amplify noise in darker areas and cannot recover clipped highlights in subsequent scans. It preserves color ratios and average reference brightness; it does not calibrate white balance or replace a color-chart correction. Uneven paper, shadows, marks, changes to lighting, or moving the phone invalidate the reference even if camera settings still match.
+Local TCP has no authentication or encryption; use a trusted network. Pairing and retryable delivery are future work. Folder selection lasts for the app session. A physical iPhone is required for capture/discovery validation.
 
-## DKC-Pro Gray Balance
+## Calibration
 
-Supported chart: DGK Color Tools DKC-Pro 5 x 7 inch, with 12% and 18% neutral gray targets. This slice provides post-capture neutral white balance, not an 18-patch color matrix or a camera RAW profile. Target names record which patch was used; reflectance is not treated as an absolute output brightness.
+With phone and lights fixed, focus on a print and Lock Settings. Replace it with a blank matte neutral sheet at the same height filling the frame, then Capture Flat Field. Avoid clipping; a moderately bright gray sheet works well. References are archived under _calibrations/. Replace the sheet with the print without moving the camera/lights. Enable Flat-field correction for subsequent captures.
 
-Focus on a print and lock the settings. Place the chart at the same plane under the same lighting, then press Capture Gray Chart. In the chart window, select the 12% or 18% target name and drag a rectangle wholly inside that gray patch. Use Gray Sample saves the profile. The large neutral gray reverse side can also be used as the 18% target; this is a calibration capture, not a back scan of a print. Avoid labels, patch borders, glare, and shadows.
+Flat field smooths a low-resolution reference luminance grid and applies its mean-normalized reciprocal in linear light. Gains outside 0.25 to 4 and dark/clipped samples are rejected. It preserves color ratios and average reference brightness. Strong gains amplify noise and cannot recover clipped highlights; uneven paper, shadows, setup changes, or phone movement invalidate the reference even if settings match.
 
-The original chart capture is archived as an asset, and the profile plus a reference copy are saved under _calibrations/<UUID>/gray-balance.json. Subsequent scans can enable Gray balance and Flat-field correction independently; processing applies flat field first, then gray balance, and writes one corrected TIFF. Metadata records both profile IDs when used. Unlocking, disconnecting, or changing the archive folder clears both active profiles. Capture a new chart after changing lighting or camera position.
+For DGK Color Tools DKC-Pro 5 x 7 inch gray balance, lock settings and Capture Gray Chart. Select the 12% or 18% target and drag a rectangle wholly inside that neutral patch. Use Gray Sample archives the original chart reference and profile. The chart capture is held for selection rather than creating a finished print asset. Avoid labels, patch borders, glare, and shadows. The neutral reverse side may serve as the 18% target; this is calibration, not back pairing.
 
-Sampling uses the displayed oriented image's normalized top-left selection coordinates. A linear RGB sample must be sufficiently bright, below clipping, and uniform. Mean-normalized channel gains neutralize the patch while preserving its luminance; gains beyond 0.5 to 2 are rejected. The algorithm cannot establish that a selected colored patch is neutral, so correct patch selection matters. HEIC/JPEG tone mapping limits the accuracy achievable with this method.
+Sampling uses oriented, normalized top-left coordinates. It rejects dark, clipped, or uneven samples and gains beyond 0.5 to 2. Mean-normalized RGB gains neutralize the selected patch while preserving measured luminance; reflectance labels do not force absolute brightness. Correct selection matters because the algorithm cannot establish that a colored patch is neutral. HEIC/JPEG tone mapping limits accuracy. Combined processing applies flat field first, then gray balance.
 
-The manufacturer describes the neutral targets in its [DKC-Pro guide](https://dgkcolor.tools/wp-content/uploads/2019/09/Complete-Guide-to-the-DKC-Pro-Color-Chart_Final.pdf). DKC-Pro reference colors are not interchangeable with a Macbeth/X-Rite ColorChecker; a future multi-patch fit must use the DKC-Pro's own reference data with a verified color-space/white-point interpretation.
+Active profiles last for the current connection and archive folder. Unlocking, disconnecting, or changing folders clears them; archived profiles and the recipes of existing scans remain intact. Loading profiles across sessions is S02. The manufacturer describes neutral targets in its [DKC-Pro guide](https://dgkcolor.tools/wp-content/uploads/2019/09/Complete-Guide-to-the-DKC-Pro-Color-Chart_Final.pdf). Multi-patch calibration awaits verified DKC-Pro reference information; do not substitute ColorChecker values.
 
-## Print Cropping
+## Print Review
 
-After saving a scan, press Detect Print. Review a detected boundary or select Manual, then drag the four corner handles onto the print's corners. Save Crop writes a perspective-corrected 16-bit sRGB TIFF alongside the scan. After rectification, each edge is trimmed inward by 2.5% of the shorter side (rounded up to whole pixels), favoring a small loss of print over visible background or edge shadows. The review handles and recorded normalized corners describe the boundary before this trim. Crossing corners or moving a corner outside the image is rejected. The Original / Corrected / Cropped selector compares the available versions; Show in Finder reveals the crop when Cropped is selected.
+Detection combines [Vision document segmentation](https://developer.apple.com/documentation/vision/vndetectdocumentsegmentationrequest) with [rectangle detection](https://developer.apple.com/documentation/vision/vndetectrectanglesrequest), showing up to eight suggestions. Frames, chart patches, or background edges may be detected; review is required. With no detection, the manual starting box is explicitly identified. Dragging any handle switches to Manual while retaining the other corners.
 
-Detection prefers Apple's [Vision document segmentation](https://developer.apple.com/documentation/vision/vndetectdocumentsegmentationrequest), with the [Vision rectangle detector](https://developer.apple.com/documentation/vision/vndetectrectanglesrequest) supplying fallback and alternative boundaries. Rectification uses [Core Image perspective correction](https://developer.apple.com/documentation/coreimage/ciperspectivecorrection). Up to eight candidates are shown. Detection is a suggestion: internal picture frames, chart patches and background edges can also be detected, so the crop requires review. When nothing is detected, an explicit message identifies the handles as a manual starting box. Dragging a handle switches to Manual while preserving the other corners; selecting Manual also preserves the current boundary. The review uses a cached, oriented 1,600-pixel RGBA preview decoded in the background so dragging never reloads the full-resolution scan. Saving still uses the full-resolution source.
-
-Cropping uses the existing full-frame corrected TIFF if available, otherwise the original. It does not reapply calibration or change the original/full-frame files. Each crop has a unique filename; metadata records the latest crop per side, source filename, normalized corners, and output dimensions. Older crop files remain available. This slice crops one selected print from the latest scan; automatic multi-print extraction is future work.
-
-Multi-patch DKC-Pro color calibration is on hold until the supplied chart reference information can be checked. Neutral gray balance remains available.
+The cached 1,600-pixel review image includes the accepted calibration but no crop or rotation. Acceptance renders the full-resolution source through the same calibration recipe and [perspective correction](https://developer.apple.com/documentation/coreimage/ciperspectivecorrection). Each edge trims inward by 2.5% of the shorter rectified side, rounded up, favoring a small loss of print over visible background/shadows. Recorded corners describe the boundary before trim. Crossed or out-of-image corners are rejected. One print is extracted per capture; multi-print extraction is S04.
 
 ## Verification
 
-Build both Xcode schemes. A physical iPhone is required to verify camera capture and local network discovery.
-
-Protocol smoke test:
+Build both schemes (camera: generic iOS device, desk: macOS). Synthetic tests require macOS image/Vision services; a restricted execution sandbox may block them. Use a writable Swift module cache if the default cache is unavailable.
 
 ```sh
-swiftc -parse-as-library Shared/ScanProtocol.swift Tests/ProtocolSmoke.swift -o /tmp/photoscan-protocol-smoke
+swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift Tests/ProtocolSmoke.swift -o /tmp/photoscan-protocol-smoke
 /tmp/photoscan-protocol-smoke
+
+# Repeat with FlatFieldSmoke, GrayBalanceSmoke, PrintCropSmoke, or FinishedOutputSmoke.
+swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/{FlatField,GrayBalance,PrintCrop,ScanArchive}.swift Tests/FinishedOutputSmoke.swift -o /tmp/photoscan-finished-smoke
+/tmp/photoscan-finished-smoke
 ```
 
-Synthetic flat-field and archive tests:
+FinishedOutputSmoke covers pending publication, JPEG/HEIC source preservation, embedded metadata readback/removal, unknown/partial/approximate/exact dates, repeated date changes, rotation, invalid recipes, blocked writes, existing-name rejection, duplicate indices/IDs, concurrent allocation in fresh processes, JPEG export, and 16-bit TIFF export. Calibration/crop tests cover combined processing, perspective dimensions, orientation, trim, and failed revision preservation.
 
-```sh
-swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/FlatFieldSmoke.swift -o /tmp/photoscan-flatfield-smoke
-/tmp/photoscan-flatfield-smoke
-```
-
-DKC-Pro neutral sample and combined processing tests:
-
-```sh
-swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift Tests/GrayBalanceSmoke.swift -o /tmp/photoscan-gray-smoke
-/tmp/photoscan-gray-smoke
-```
-
-Print detection and crop tests:
-
-```sh
-swiftc -parse-as-library Shared/ScanProtocol.swift PhotoScanDesk/PhotoScanDesk/FlatField.swift PhotoScanDesk/PhotoScanDesk/GrayBalance.swift PhotoScanDesk/PhotoScanDesk/ScanArchive.swift PhotoScanDesk/PhotoScanDesk/PrintCrop.swift Tests/PrintCropSmoke.swift -o /tmp/photoscan-crop-smoke
-/tmp/photoscan-crop-smoke
-```
+Physical iPhone capture, real-print crop accuracy, calibration accuracy, and Apple Photos import of finished metadata remain S01 validation work. Both apps build and synthetic checks pass; this is distinct from physical verification.
