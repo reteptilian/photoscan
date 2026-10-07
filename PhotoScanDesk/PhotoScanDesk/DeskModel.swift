@@ -14,6 +14,7 @@ struct CropReview: Identifiable {
     let originalURL: URL
     let sourceURL: URL
     let candidates: [PrintBoundary]
+    let preview: CGImage
 }
 
 @MainActor
@@ -224,14 +225,18 @@ final class DeskModel: ObservableObject {
         let sourceURL = FileManager.default.fileExists(atPath: corrected.path) ? corrected : originalURL
         busy = true; processing = true; error = nil; status = "Detecting print"
         Task {
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<[PrintBoundary], Error> in
-                do { return .success(try PrintCrop.detect(PrintCrop.image(url: sourceURL))) }
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<([PrintBoundary], CGImage), Error> in
+                do {
+                    let preview = try PrintCrop.reviewPreview(url: sourceURL)
+                    let candidates = try PrintCrop.detect(PrintCrop.image(url: sourceURL))
+                    return .success((candidates, preview))
+                }
                 catch { return .failure(error) }
             }.value
             processing = false; finish()
             switch result {
-            case .success(let candidates):
-                cropReview = CropReview(originalURL: originalURL, sourceURL: sourceURL, candidates: candidates)
+            case .success(let (candidates, preview)):
+                cropReview = CropReview(originalURL: originalURL, sourceURL: sourceURL, candidates: candidates, preview: preview)
                 status = candidates.isEmpty ? "No boundary detected; manual crop available" : "Review print boundary"
             case .failure(let failure): error = failure.localizedDescription; status = "Detection failed"
             }

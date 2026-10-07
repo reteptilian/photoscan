@@ -22,13 +22,43 @@ struct PrintCropSmoke {
             abs(boundary.corners[0].x - 0.2) < 0.03 && abs(boundary.corners[0].y - 0.2) < 0.03
                 && abs(boundary.corners[2].x - 0.8) < 0.03 && abs(boundary.corners[2].y - 0.8) < 0.03
         }, "Detect the paper's outer boundary in normalized top-left coordinates")
+        let angle: CGFloat = 0.07
+        let rotation = CGAffineTransform(a: cos(angle), b: sin(angle), c: -sin(angle), d: cos(angle),
+            tx: 500 - cos(angle) * 500 + sin(angle) * 400,
+            ty: 400 - sin(angle) * 500 - cos(angle) * 400)
+        let rotatedPaper = CIImage(color: .white).cropped(to: printRect).transformed(by: rotation)
+            .composited(over: CIImage(color: CIColor(red: 0.3, green: 0.3, blue: 0.3)).cropped(to: bounds))
+            .cropped(to: bounds)
+        let expectedCorners = [CGPoint(x: 200, y: 640), CGPoint(x: 800, y: 640),
+                               CGPoint(x: 800, y: 160), CGPoint(x: 200, y: 160)].map {
+            let point = $0.applying(rotation)
+            return CGPoint(x: point.x / bounds.width, y: 1 - point.y / bounds.height)
+        }
+        let rotatedCandidates = try PrintCrop.detect(rotatedPaper)
+        precondition(rotatedCandidates.contains { candidate in
+            zip(candidate.corners, expectedCorners).allSatisfy { actual, expected in
+                hypot(actual.x - expected.x, actual.y - expected.y) < 0.03
+            }
+        }, "Detect all four corners of a rotated print on gray")
         let top = CIImage(color: CIColor(red: 1, green: 0, blue: 0)).cropped(to: CGRect(x: 200, y: 600, width: 600, height: 40))
         let bottom = CIImage(color: CIColor(red: 0, green: 0, blue: 1)).cropped(to: CGRect(x: 200, y: 160, width: 600, height: 40))
         let source = top.composited(over: bottom.composited(over: paper))
         let boundary = PrintBoundary(corners: [CGPoint(x: 0.2, y: 0.2), CGPoint(x: 0.8, y: 0.2),
                                               CGPoint(x: 0.8, y: 0.8), CGPoint(x: 0.2, y: 0.8)])
         let cropped = try PrintCrop.corrected(source, boundary: boundary)
-        precondition(abs(cropped.extent.width - 600) < 2 && abs(cropped.extent.height - 480) < 2)
+        precondition(abs(cropped.extent.width - 576) < 2 && abs(cropped.extent.height - 456) < 2)
+        precondition(cropped.extent.origin == .zero)
+        // Simulate a detector selecting ten pixels of gray background on every edge.
+        let gray = CIImage(color: CIColor(red: 0.3, green: 0.3, blue: 0.3)).cropped(to: bounds)
+        let insetPaper = CIImage(color: .white).cropped(to: printRect.insetBy(dx: 10, dy: 10)).composited(over: gray)
+        let clean = try PrintCrop.corrected(insetPaper, boundary: boundary)
+        let edgeRegions = [CGRect(x: 0, y: 0, width: 1, height: clean.extent.height),
+                           CGRect(x: clean.extent.width - 1, y: 0, width: 1, height: clean.extent.height),
+                           CGRect(x: 0, y: 0, width: clean.extent.width, height: 1),
+                           CGRect(x: 0, y: clean.extent.height - 1, width: clean.extent.width, height: 1)]
+        for region in edgeRegions {
+            precondition(color(clean, region: region).prefix(3).allSatisfy { $0 > 0.99 }, "Trim gray background from every edge")
+        }
         let topColor = color(cropped, region: CGRect(x: 100, y: cropped.extent.height - 20, width: 100, height: 10))
         let bottomColor = color(cropped, region: CGRect(x: 100, y: 10, width: 100, height: 10))
         precondition(topColor[0] > 0.9 && topColor[2] < 0.1 && bottomColor[2] > 0.9 && bottomColor[0] < 0.1, "Crop must not flip orientation")
@@ -48,6 +78,13 @@ struct PrintCropSmoke {
         let correctedURL = original.deletingLastPathComponent().appendingPathComponent("front-corrected.tiff")
         try FlatField.context().writeTIFFRepresentation(of: source, to: correctedURL, format: .RGBA16,
             colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, options: [:])
+        let preview = try PrintCrop.reviewPreview(url: correctedURL)
+        precondition(preview.width == 1000 && preview.height == 800)
+        precondition(preview.bitsPerComponent == 8 && preview.bitsPerPixel == 32)
+        precondition(preview.alphaInfo == .premultipliedLast, "Review uses an already decoded RGBA bitmap")
+        let previewTop = color(CIImage(cgImage: preview), region: CGRect(x: 300, y: 610, width: 100, height: 10))
+        let previewBottom = color(CIImage(cgImage: preview), region: CGRect(x: 300, y: 170, width: 100, height: 10))
+        precondition(previewTop[0] > 0.9 && previewBottom[2] > 0.9, "Review preserves source orientation")
         let output = try PrintCrop.save(originalURL: original, sourceURL: correctedURL, boundary: boundary)
         let originalBytes = try Data(contentsOf: original)
         precondition(originalBytes == data)
