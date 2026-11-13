@@ -5,6 +5,7 @@
 //  Created by Peter Esbensen on 10/6/26.
 //
 
+import Network
 import SwiftUI
 import UniformTypeIdentifiers
 
