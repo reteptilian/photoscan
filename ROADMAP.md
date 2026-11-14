@@ -1,6 +1,6 @@
 # PhotoScan Work Slices
 
-Living specification and progress tracker. Last updated: 2026-10-07.
+Living specification and progress tracker. Last updated: 2026-11-14.
 
 ## How to Maintain This Document
 
@@ -42,6 +42,7 @@ See [README.md](README.md) for the current workflow, limitations, and test comma
 | S07 | Archive browsing and export | Planned | Metadata contract from S06 |
 | S08 | Front/back pairing | Planned | Optional; S04 and S05 for batch matching |
 | S09 | Reliability and packaging | Planned | Incremental fixes throughout; final release checks |
+| S11 | Guided light matching | Done | Automated checks; physical P96 repeatability validation remains S01 |
 | O01 | Live Mac preview | Planned | Optional; prioritize if phone positioning is cumbersome |
 
 The order is a default, not a strict dependency chain. S10 comes first despite its ID; IDs remain stable when priorities change. S03 can proceed when its reference information is available. Reliability fixes should happen when needed rather than wait for S09.
@@ -198,6 +199,21 @@ Goal: make the apps trustworthy for sustained use and straightforward to install
 - [ ] Produce installable builds and document supported versions and release verification.
 
 Verification / progress (2026-10-07): incremental connection recovery and diagnostics implemented after physical failures. Shared-LAN Bonjour/TCP replaces AWDL opt-in; keepalives and a bounded retransmission deadline release broken peers. Optional capture.progress messages, incoming frame progress, path/state logs, and last-stage timeout errors distinguish camera processing from transfer. Persistent rotating app logs, optional diagnostics.relay phone history/live transport forwarding, a Mac Logs button, and phone snapshot sharing now support direct diagnosis without console copy/paste. DiagnosticsSmoke verifies rotation, snapshots, write failure and recovery; ConnectionSmoke verifies non-recursive relay during bulk transfer. Internal Apple framework logs are still system-console data. Physical logs showed repeated NECP flow creation failures (`File exists`) on Wi-Fi and AWDL; underlying cause remains unverified, though the next user run reported normal connection/capture timing. ConnectionSmoke covers connection/handshake deadlines, consecutive 4 MiB transfers, and transfer progress; ProtocolSmoke covers capability negotiation. Current transfer is local TCP with no authentication; failures require a new capture. Address concrete reliability issues in earlier slices as they arise.
+
+### S11: Guided Light Matching
+
+Goal: match two adjustable lights through the final cross-polarized scanning setup, with automatic camera locks and explicit calibration invalidation.
+
+Scope: on-demand low-resolution sampling preview; gray-area selection; automatic settling/locking with both lights on; saved A, live B comparison, best score and separate brightness; A repeatability check; final exposure-only adjustment; locked gray-balance and flat-field references before scanning. No absolute Kelvin, spectral measurement, or automatic physical-light control.
+
+- [x] Automatically lock focus, exposure, and white balance, keeping the same settings throughout A/B comparison.
+- [x] Compare averaged brightness-normalized linear RGB; show warmth/tint, brightness, and best stable match.
+- [x] Reject dark, clipped, uneven, unstable, stale, or incompatible measurements; require a fresh A recheck.
+- [x] Finalize exposure while preserving focus and white balance, and keep scanning locked to the final references.
+- [x] Invalidate on changed settings, unlock, disconnect, or session interruption; check expected settings on the phone before capture.
+- [x] Verify the workflow, sampling, wire format, and mock camera engine; build both app schemes.
+
+Verification (2026-11-14): LightMatchingSmoke, ProtocolSmoke, and updated Simulator MockCameraSmoke pass. ConnectionSmoke and GrayBalanceSmoke also pass; the latter had one transient exact floating-point equality failure and passed unchanged on rerun. Both app schemes build with signing disabled. The Match Lights screen was rendered offscreen and visually inspected. Physical P96 color matching, preview/still repeatability, actual interruption recovery, and hands-on UI validation remain S01. Matching gray cannot guarantee identical spectral rendering of colored originals. See README for the guided steps and limitations.
 
 ### O01: Live Mac Preview
 

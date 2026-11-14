@@ -75,10 +75,7 @@ struct CaptureInfo: Codable, Sendable {
     func hasSameLockedSetup(as reference: CaptureInfo) -> Bool {
         guard let a = reference.settings, let b = settings, a.locked, b.locked,
               reference.camera == camera, reference.width == width, reference.height == height else { return false }
-        func near(_ x: Double, _ y: Double) -> Bool { abs(x - y) <= max(abs(x) * 0.01, 0.000001) }
-        return near(a.iso, b.iso) && near(a.exposureSeconds, b.exposureSeconds)
-            && abs(a.focusPosition - b.focusPosition) <= 0.002
-            && near(a.redGain, b.redGain) && near(a.greenGain, b.greenGain) && near(a.blueGain, b.blueGain)
+        return a.matchesLocked(b)
     }
 }
 struct CameraSettings: Codable, Equatable, Sendable {
@@ -93,6 +90,18 @@ struct CameraSettings: Codable, Equatable, Sendable {
     let blueGain: Double
     let width: Int
     let height: Int
+    var sessionID: UUID? = nil
+
+    func matchesLocked(_ other: CameraSettings) -> Bool {
+        func near(_ x: Double, _ y: Double) -> Bool {
+            x.isFinite && y.isFinite && abs(x - y) <= max(abs(x) * 0.01, 0.000001)
+        }
+        return locked && other.locked && sessionID == other.sessionID
+            && width == other.width && height == other.height
+            && near(iso, other.iso) && near(exposureSeconds, other.exposureSeconds)
+            && abs(focusPosition - other.focusPosition) <= 0.002
+            && near(redGain, other.redGain) && near(greenGain, other.greenGain) && near(blueGain, other.blueGain)
+    }
 }
 enum ScanApp: String, Codable, Sendable {
     case camera = "PhotoScanCamera", desk = "PhotoScanDesk"
@@ -104,7 +113,8 @@ enum ScanCapability {
     static let captureSettings = "capture.settings"
     static let diagnostics = "diagnostics.relay"
     static let captureProgress = "capture.progress"
-    static let supported = [capture, settings, captureSettings, captureProgress, diagnostics]
+    static let lightMatching = "calibration.lightMatching"
+    static let supported = [capture, settings, captureSettings, captureProgress, diagnostics, lightMatching]
 }
 struct ScanHello: Codable, Equatable, Sendable {
     let app: ScanApp
@@ -298,11 +308,11 @@ final class ScanConnection {
         }
         do {
             let data = try ScanWire.encode(message, image: image)
-            if message.kind != "settings" && message.kind != "diagnostic" { trace("Sending \(message.kind); frame bytes: \(data.count)") }
+            if message.kind != "settings" && message.kind != "diagnostic" && message.kind != "lightPreview" && message.kind != "getLightPreview" { trace("Sending \(message.kind); frame bytes: \(data.count)") }
             connection.send(content: data, completion: .contentProcessed { [weak self] error in
                 MainActor.assumeIsolated {
                     if let error { self?.close(error.localizedDescription) }
-                    else if message.kind != "settings" && message.kind != "diagnostic" { self?.trace("TCP send completed: \(message.kind) (not an application acknowledgement)") }
+                    else if message.kind != "settings" && message.kind != "diagnostic" && message.kind != "lightPreview" && message.kind != "getLightPreview" { self?.trace("TCP send completed: \(message.kind) (not an application acknowledgement)") }
                     completion?(error == nil)
                 }
             })
@@ -340,7 +350,7 @@ final class ScanConnection {
                         let body = self.buffer.subdata(in: 4..<(size + 4))
                         self.buffer.removeSubrange(0..<(size + 4))
                         let (message, image) = try ScanWire.decode(body)
-                        if message.kind != "settings" && message.kind != "diagnostic" { self.trace("Received \(message.kind); image bytes: \(image.count)") }
+                        if message.kind != "settings" && message.kind != "diagnostic" && message.kind != "lightPreview" && message.kind != "getLightPreview" { self.trace("Received \(message.kind); image bytes: \(image.count)") }
                         let wasReady = self.session.ready
                         if try self.session.receive(message, image: image) {
                             self.onMessage?(message, image)

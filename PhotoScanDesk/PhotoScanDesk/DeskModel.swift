@@ -24,6 +24,28 @@ final class DeskModel: ObservableObject {
     @Published var cameras: [NWBrowser.Result] = []
     @Published var status = "Searching for cameras"
     @Published var connected = false
+    @Published var supportsLightMatching = false
+    @Published var lightMatcher: LightMatchController?
+    @Published private(set) var needsMatchedCalibration = false
+    private var matchedSettings: CameraSettings?
+    private var settingsCompletion: ((Result<CameraSettings, Error>) -> Void)?
+    var canCalibrate: Bool {
+        connected && supportsCalibration && !busy && folder != nil && settings?.locked == true
+            && lightMatcher == nil && (!needsMatchedCalibration || matchedSettings != nil)
+    }
+    var canCapture: Bool {
+        connected && !busy && folder != nil && settings?.locked == true && lightMatcher == nil
+            && (!needsMatchedCalibration || (matchedSettings != nil && flatField != nil && grayBalance != nil))
+    }
+    var setupStatus: String {
+        if lightMatcher != nil { return "Light matching in progress" }
+        if needsMatchedCalibration {
+            if matchedSettings == nil { return "Calibration needs checking · Run Match Lights" }
+            if grayBalance == nil || flatField == nil { return "Camera locked · Capture gray balance and flat field" }
+            return "Camera locked · Calibration ready"
+        }
+        return settings?.locked == true ? "Camera locked" : "Lock camera settings before scanning"
+    }
     @Published var supportsSettings = false
     @Published var supportsCalibration = false
     @Published var cameraVersion = ""
@@ -100,6 +122,7 @@ final class DeskModel: ObservableObject {
         }
         peer.onTransportReady = { [weak self] in self?.status = "Checking camera compatibility" }
         peer.onReady = { [weak self, weak peer] in
+            self?.supportsLightMatching = peer?.supports(ScanCapability.lightMatching) == true
             self?.supportsSettings = peer?.supports(ScanCapability.settings) == true
             self?.supportsCalibration = peer?.supports(ScanCapability.settings) == true
                 && peer?.supports(ScanCapability.captureSettings) == true
@@ -112,6 +135,10 @@ final class DeskModel: ObservableObject {
             }
         }
         peer.onClose = { [weak self] reason in
+            self?.lightMatcher?.invalidate("Camera disconnected. Reconnect and restart light matching.")
+            self?.matchedSettings = nil; self?.supportsLightMatching = false
+            let completion = self?.settingsCompletion; self?.settingsCompletion = nil
+            completion?(.failure(ScanCompatibilityError(reason: reason)))
             self?.connected = false; self?.peer = nil
             self?.settings = nil
             self?.supportsSettings = false; self?.supportsCalibration = false; self?.cameraVersion = ""
@@ -131,17 +158,31 @@ final class DeskModel: ObservableObject {
             case "ready":
                 self.timeout?.cancel(); self.timeout = nil
                 self.connected = true; self.status = "Camera ready"
+            case "lightPreview":
+                self.lightMatcher?.receive(message, data: image)
             case "settings":
                 self.settings = message.settings
+                self.lightMatcher?.observe(message.settings)
+                if let matched = self.matchedSettings,
+                   message.settings.map({ matched.matchesLocked($0) }) != true {
+                    self.matchedSettings = nil; self.flatField = nil; self.grayBalance = nil; self.chartReference = nil
+                }
+                self.invalidateIncompatibleProfiles()
                 if message.settings?.locked != true { self.flatField = nil; self.grayBalance = nil; self.chartReference = nil }
                 if let commandID = message.commandID, commandID == self.pendingCommand {
+                    let completion = self.settingsCompletion; self.settingsCompletion = nil
                     self.finish(); self.status = message.settings?.locked == true ? "Settings locked" : "Automatic settings"
+                    if let settings = message.settings { completion?(.success(settings)) }
+                    else { completion?(.failure(ScanCompatibilityError(reason: "Missing camera settings."))) }
                 }
             case "error":
                 let captureError = message.request != nil && message.request == self.pending
                 let settingsError = message.commandID != nil && message.commandID == self.pendingCommand
                 guard captureError || settingsError else { return }
+                let completion = settingsError ? self.settingsCompletion : nil
+                if settingsError { self.settingsCompletion = nil }
                 self.error = message.text; self.finish(); self.status = "Camera ready"
+                completion?(.failure(ScanCompatibilityError(reason: message.text ?? "Camera command failed.")))
             case "captureProgress":
                 guard message.request == self.pending, let stage = message.text else { return }
                 self.capturePhase = stage; self.status = stage
@@ -156,6 +197,8 @@ final class DeskModel: ObservableObject {
     func disconnect() {
         peer?.close()
         peer = nil; connected = false; finish()
+        matchedSettings = nil; supportsLightMatching = false
+        lightMatcher?.invalidate("Camera disconnected. Reconnect and restart light matching.")
         settings = nil
         supportsSettings = false; supportsCalibration = false; cameraVersion = ""; connectionPath = ""
         flatField = nil
@@ -164,15 +207,47 @@ final class DeskModel: ObservableObject {
     func setLocked(_ locked: Bool) {
         guard connected, supportsSettings, !busy, settings != nil else { return }
         if !locked { flatField = nil; grayBalance = nil; chartReference = nil }
+        issueSettingsCommand(locked ? "lockSettings" : "unlockSettings") { [weak self] result in
+            if case .failure(let error) = result { self?.error = error.localizedDescription }
+        }
+    }
+    private func issueSettingsCommand(_ kind: String, completion: @escaping (Result<CameraSettings, Error>) -> Void) {
+        guard connected, supportsSettings, !busy else {
+            completion(.failure(ScanCompatibilityError(reason: "Camera is unavailable or busy."))); return
+        }
+        settingsCompletion = completion
         let commandID = UUID()
         pendingCommand = commandID; busy = true; error = nil
-        status = locked ? "Settling and locking settings" : "Unlocking settings"
-        peer?.send(ScanMessage(kind: locked ? "lockSettings" : "unlockSettings", commandID: commandID))
+        status = "Configuring camera settings"
+        peer?.send(ScanMessage(kind: kind, commandID: commandID))
         timeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(15))
             guard !Task.isCancelled, let self, self.pendingCommand == commandID else { return }
             self.peer?.close("Settings command timed out. Reconnect and try again.")
         }
+    }
+    func startLightMatching() {
+        guard connected, supportsLightMatching, !busy, lightMatcher == nil else { return }
+        needsMatchedCalibration = true; matchedSettings = nil
+        flatField = nil; grayBalance = nil; chartReference = nil; error = nil
+        let matcher = LightMatchController(send: { [weak self] message in self?.peer?.send(message) },
+            command: { [weak self] kind, completion in
+                guard let self else { return }
+                self.issueSettingsCommand(kind, completion: completion)
+            })
+        matcher.onFinalized = { [weak self] settings in self?.matchedSettings = settings }
+        lightMatcher = matcher
+    }
+    func closeLightMatching() {
+        guard !busy, lightMatcher?.adjusting != true else { return }
+        if lightMatcher?.cameraReady != true { matchedSettings = nil }
+        lightMatcher?.stop(); lightMatcher = nil
+    }
+    private func invalidateIncompatibleProfiles() {
+        guard let settings else { flatField = nil; grayBalance = nil; chartReference = nil; return }
+        if let reference = flatField?.reference.settings, !reference.matchesLocked(settings) { flatField = nil }
+        if let reference = grayBalance?.reference.settings, !reference.matchesLocked(settings) { grayBalance = nil }
+        if let reference = chartReference?.info.settings, !reference.matchesLocked(settings) { chartReference = nil }
     }
     func prepareArchiveFolder() {
         guard !preparedArchive else { return }
@@ -206,6 +281,7 @@ final class DeskModel: ObservableObject {
         }
     }
     func capture() {
+        guard canCapture else { return }
         beginCapture(reference: false)
     }
     func captureFlatField() {
@@ -217,7 +293,8 @@ final class DeskModel: ObservableObject {
         beginCapture(reference: false, chart: true)
     }
     private func beginCapture(reference: Bool, chart: Bool = false) {
-        guard connected, !busy, cropReview == nil, folder != nil else { return }
+        guard connected, !busy, cropReview == nil, lightMatcher == nil, folder != nil, settings?.locked == true else { return }
+        if needsMatchedCalibration && matchedSettings == nil { error = "Complete Match Lights before capturing calibration references."; return }
         referenceCapture = reference
         chartCapture = chart
         let request = CaptureRequest(assetID: UUID(), side: .front)
@@ -226,7 +303,7 @@ final class DeskModel: ObservableObject {
         capturePhase = peer?.supports(ScanCapability.captureProgress) == true
             ? "Waiting for the phone to acknowledge Capture" : "Waiting for captured image (phone has no progress reporting)"
         status = capturePhase
-        peer?.send(ScanMessage(kind: "capture", request: request))
+        peer?.send(ScanMessage(kind: "capture", request: request, settings: settings))
         timeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(60))
             guard !Task.isCancelled, let self, self.pending == request else { return }
@@ -238,6 +315,9 @@ final class DeskModel: ObservableObject {
     }
     private func save(_ info: CaptureInfo, image: Data) {
         guard let folder else { return }
+        guard let captured = info.settings, let current = settings, current.matchesLocked(captured) else {
+            finish(); error = "Camera settings changed during capture. Check calibration and try again."; return
+        }
         let reference = referenceCapture
         let chart = chartCapture
         let profile = applyCorrection && !reference && !chart ? flatField : nil
@@ -258,10 +338,10 @@ final class DeskModel: ObservableObject {
             switch result {
             case .success(let (url, calibration)):
                 if let calibration {
-                    if connected && settings?.locked == true { flatField = calibration }
+                    if connected, let current = settings, calibration.reference.settings?.matchesLocked(current) == true { flatField = calibration }
                     status = "Flat field saved"
                 } else if chart {
-                    if connected && settings?.locked == true { chartReference = ChartReference(info: info, data: image) }
+                    if connected, let current = settings, info.settings?.matchesLocked(current) == true { chartReference = ChartReference(info: info, data: image) }
                     status = "Select the neutral gray patch"
                 } else if let url {
                     assetURL = url; latestURL = nil; finishedPreview = nil; finishedDimensions = ""
@@ -386,7 +466,7 @@ final class DeskModel: ObservableObject {
             processing = false; finish()
             switch result {
             case .success(let profile):
-                if connected && settings?.locked == true { grayBalance = profile }
+                if connected, let current = settings, profile.reference.settings?.matchesLocked(current) == true { grayBalance = profile }
                 chartReference = nil; status = "Gray balance saved"
             case .failure(let failure): error = failure.localizedDescription; status = "Calibration failed"
             }

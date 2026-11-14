@@ -33,12 +33,15 @@ struct ContentView: View {
                 Button("Archive Folder", systemImage: "folder", action: model.chooseFolder)
                     .disabled(model.busy)
                 Button("Capture", systemImage: "camera", action: model.capture)
-                    .disabled(!model.connected || model.busy || model.folder == nil)
+                    .disabled(!model.canCapture)
                     .keyboardShortcut(.space, modifiers: [])
             }
             .padding()
             Divider()
             HStack(alignment: .top, spacing: 16) {
+                Button("Match Lights", systemImage: "lightbulb.2", action: model.startLightMatching)
+                    .disabled(!model.connected || !model.supportsLightMatching || model.busy || model.lightMatcher != nil)
+                    .help("Match two lights using a gray card and automatically locked camera settings")
                 Button(model.settings?.locked == true ? "Unlock Settings" : "Lock Settings",
                        systemImage: model.settings?.locked == true ? "lock.open" : "lock") {
                     model.setLocked(model.settings?.locked != true)
@@ -54,10 +57,12 @@ struct ContentView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal).padding(.vertical, 10)
+            Text(model.setupStatus).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.bottom, 8)
             Divider()
             HStack {
                 Button("Capture Flat Field", systemImage: "rectangle.dashed", action: model.captureFlatField)
-                    .disabled(!model.connected || !model.supportsCalibration || model.busy || model.folder == nil || model.settings?.locked != true)
+                    .disabled(!model.canCalibrate)
                 Toggle("Flat-field correction", isOn: $model.applyCorrection)
                     .disabled(model.flatField == nil || model.busy)
                 if model.flatField != nil {
@@ -76,7 +81,7 @@ struct ContentView: View {
             Divider()
             HStack {
                 Button("Capture Gray Chart", systemImage: "eyedropper", action: model.captureGrayChart)
-                    .disabled(!model.connected || !model.supportsCalibration || model.busy || model.folder == nil || model.settings?.locked != true)
+                    .disabled(!model.canCalibrate)
                 Toggle("Gray balance", isOn: $model.applyGrayBalance)
                     .disabled(model.grayBalance == nil || model.busy)
                 if model.grayBalance != nil {
@@ -151,6 +156,9 @@ struct ContentView: View {
             // Present the initial picker after the window's first update.
             await Task.yield()
             model.prepareArchiveFolder()
+        }
+        .sheet(item: $model.lightMatcher) { matcher in
+            LightMatchView(matcher: matcher, model: model)
         }
         .sheet(item: $model.chartReference) { chart in
             GrayChartView(chart: chart, model: model)

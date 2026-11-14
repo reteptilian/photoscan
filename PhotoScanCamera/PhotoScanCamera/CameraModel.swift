@@ -78,7 +78,16 @@ final class CameraModel: ObservableObject {
         }
         peer.onMessage = { [weak self, weak peer] message, _ in
             guard let self, self.connected else { return }
-            if message.kind == "lockSettings" || message.kind == "unlockSettings" {
+            if message.kind == "getLightPreview" {
+                guard peer?.supports(ScanCapability.lightMatching) == true, let id = message.commandID else { return }
+                self.engine.readLightPreview { [weak peer] data, settings in
+                    Task { @MainActor [weak peer] in
+                        peer?.send(ScanMessage(kind: "lightPreview", settings: settings, commandID: id), image: data ?? Data())
+                    }
+                }
+                return
+            }
+            if ["lockSettings", "unlockSettings", "prepareLightMatching", "finalizeLightExposure"].contains(message.kind) {
                 guard let commandID = message.commandID else { return }
                 guard peer?.supports(ScanCapability.settings) == true else { return }
                 guard !self.busy, self.ready else {
@@ -86,7 +95,15 @@ final class CameraModel: ObservableObject {
                 }
                 self.busy = true; self.error = nil
                 self.status = message.kind == "lockSettings" ? "Settling camera settings" : "Unlocking settings"
-                self.engine.setLocked(message.kind == "lockSettings") { [weak self, weak peer] result in
+                guard !["prepareLightMatching", "finalizeLightExposure"].contains(message.kind)
+                    || peer?.supports(ScanCapability.lightMatching) == true else { self.busy = false; return }
+                let operation: (@escaping @Sendable (Result<CameraSettings, Error>) -> Void) -> Void
+                switch message.kind {
+                case "prepareLightMatching": operation = self.engine.prepareLightMatching
+                case "finalizeLightExposure": operation = self.engine.finalizeLightExposure
+                default: operation = { self.engine.setLocked(message.kind == "lockSettings", completion: $0) }
+                }
+                operation { [weak self, weak peer] result in
                     Task { @MainActor [weak self, weak peer] in
                         guard let self else { return }
                         self.busy = false; self.status = self.connected ? "Connected to Mac" : "Waiting for Mac"
@@ -109,7 +126,7 @@ final class CameraModel: ObservableObject {
             if peer?.supports(ScanCapability.captureProgress) == true {
                 peer?.send(ScanMessage(kind: "captureProgress", request: request, text: "Capturing on phone"))
             }
-            self.engine.capture { [weak self, weak peer] result in
+            self.engine.capture(expected: message.settings) { [weak self, weak peer] result in
                 Task { @MainActor [weak self, weak peer] in
                     guard let self else { return }
                     switch result {
