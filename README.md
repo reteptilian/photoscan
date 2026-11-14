@@ -8,7 +8,7 @@ PhotoScan remotely captures one or several prints on an iPhone, preserves the ca
 
 1. Open each Xcode project. Run PhotoScanCamera on a physical iPhone and PhotoScanDesk on the Mac.
 2. Allow Camera and Local Network access. Keep the iPhone app in the foreground with both devices on the same Wi-Fi network.
-3. On the Mac, choose an Archive Folder, then choose the phone from Cameras.
+3. On the Mac, the first launch asks you to choose an Archive Folder for originals and finished scans. PhotoScan remembers this folder across exits and restarts; use Archive Folder to change it. If the saved folder is unavailable (for example, an unplugged drive), PhotoScan asks you to select it again or choose another folder. Cancel leaves a setup message with a Choose Archive Folder button. Then choose the phone from Cameras.
 4. Press Capture. The source is saved first and print boundary review opens automatically. Review every numbered suggestion, select a print to adjust its corners, Add Print for missed detections, and Remove false suggestions. Extract Prints saves each accepted boundary as an individual asset; overlapping boundaries must be adjusted or removed first. Explicit Skip Crop publishes the full frame. Cancel leaves the frame pending; Review Prints reopens review, and Skip Crop Review publishes the full frame.
 5. After extraction, use the Print picker to select an individual finished scan. Review Prints adjusts that print’s existing crop. Metadata, rotation, preview, Finder, and exports apply to the selected print.
 6. Edit Metadata to add the original document date, title, description, labels, and people. Rotate Right changes the finished orientation. Accepted changes regenerate the finished image from the source.
@@ -91,7 +91,16 @@ The cached 1,600-pixel review image includes the accepted calibration but no cro
 
 ## Verification
 
+For desktop UI development without an iPhone, run PhotoScanCamera in an iOS Simulator. It automatically uses a mock camera, skips camera permission, and advertises as **PhotoScan Mock Camera**. Select it in PhotoScanDesk and capture normally; each capture transfers a 1200 × 1600 neutral gray JPEG through the production protocol. Keep the Simulator app running. Settings locking and calibration are unavailable for the mock. A blank image exercises manual crop review rather than print detection. Physical iPhones continue to use the real camera.
+
 Build both schemes (camera: generic iOS device, desk: macOS). DiagnosticsSmoke verifies file persistence, bounded rotation, immutable share snapshots, failed writes and recovery. ConnectionSmoke verifies diagnostic relaying without recursion and additionally verifies two consecutive 4 MiB image frames with a settings message between them and partial/completed transfer progress using the production TCP options. Synthetic tests require macOS image/Vision services; a restricted execution sandbox may block them. Use a writable Swift module cache if the default cache is unavailable.
+
+ArchiveFolderSmoke checks bookmark restoration in a fresh process, folder switching, invalid selections, unavailable folders, corrupt bookmarks, and recovery. It requires access to the macOS bookmark service. Also check the signed app manually: first-launch picker, cancellation and setup button, quit/relaunch with a selected folder, and relaunch with an archive drive disconnected.
+
+```sh
+swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library PhotoScanDesk/PhotoScanDesk/ArchiveFolderSelection.swift Tests/ArchiveFolderSmoke.swift -o /tmp/photoscan-archive-smoke
+/tmp/photoscan-archive-smoke
+```
 
 ```sh
 swiftc -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift Tests/ProtocolSmoke.swift -o /tmp/photoscan-protocol-smoke

@@ -13,7 +13,14 @@ struct ContentView: View {
     @State private var diagnosticSnapshot: URL?
     var body: some View {
         VStack(spacing: 16) {
-            CameraPreview(session: model.engine.session)
+            Group {
+                if CameraEngine.isMock {
+                    Color(white: 0.5)
+                        .overlay { Text("Mock camera").foregroundStyle(.white) }
+                } else {
+                    CameraPreview(session: model.engine.session)
+                }
+            }
                 .aspectRatio(3.0 / 4.0, contentMode: .fit)
                 .overlay { if !model.ready { ProgressView().tint(.white) } }
             HStack {

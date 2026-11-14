@@ -21,8 +21,10 @@ final class CameraModel: ObservableObject {
         guard !started else { return }
         started = true
         ScanDiagnostics.shared.record("Camera launch: " + ScanHello.current(.camera).summary)
-        guard await AVCaptureDevice.requestAccess(for: .video) else {
-            error = "Camera access is disabled. Enable it in Settings."; status = "Camera unavailable"; return
+        if !CameraEngine.isMock {
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                error = "Camera access is disabled. Enable it in Settings."; status = "Camera unavailable"; return
+            }
         }
         UIApplication.shared.isIdleTimerDisabled = true
         engine.start { [weak self] result in
@@ -38,7 +40,7 @@ final class CameraModel: ObservableObject {
     private func listen() {
         do {
             let listener = try NWListener(using: ScanWire.parameters())
-            listener.service = NWListener.Service(name: "PhotoScan Camera", type: ScanWire.service)
+            listener.service = NWListener.Service(name: CameraEngine.isMock ? "PhotoScan Mock Camera" : "PhotoScan Camera", type: ScanWire.service)
             listener.stateUpdateHandler = { [weak self] state in
                 MainActor.assumeIsolated {
                     ScanDiagnostics.shared.record("Camera listener: \(state)")
@@ -60,7 +62,7 @@ final class CameraModel: ObservableObject {
         self.peer = peer
         peer.onReady = { [weak self, weak peer] in
             self?.error = nil; self?.connected = true; self?.status = "Connected to Mac"
-            peer?.send(ScanMessage(kind: "ready", text: "Main camera"))
+            peer?.send(ScanMessage(kind: "ready", text: CameraEngine.cameraName))
             if peer?.supports(ScanCapability.diagnostics) == true {
                 peer?.send(ScanMessage(kind: "diagnostic", text: ScanDiagnostics.shared.recent()))
                 peer?.onTrace = { [weak peer] line in
@@ -118,7 +120,7 @@ final class CameraModel: ObservableObject {
                             peer?.send(ScanMessage(kind: "captureProgress", request: request, text: "Phone finished capture; waiting for image transfer"))
                         }
                         let info = CaptureInfo(request: request, capturedAt: Date(), fileExtension: photo.fileExtension,
-                            width: photo.width, height: photo.height, camera: "Main wide-angle camera",
+                            width: photo.width, height: photo.height, camera: CameraEngine.cameraName,
                             settings: photo.settings, photoISO: photo.iso, photoExposureSeconds: photo.exposureSeconds)
                         peer?.send(ScanMessage(kind: "photo", capture: info), image: photo.data) { [weak self] _ in
                             self?.busy = false; self?.status = self?.connected == true ? "Connected to Mac" : "Waiting for Mac"
@@ -136,6 +138,7 @@ final class CameraModel: ObservableObject {
     }
     private func streamSettings() {
         settingsTask?.cancel()
+        guard !CameraEngine.isMock else { return }
         settingsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let peer = self.peer else { return }

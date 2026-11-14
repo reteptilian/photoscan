@@ -114,10 +114,16 @@ struct ScanHello: Codable, Equatable, Sendable {
     let capabilities: [String]
 
     static func current(_ app: ScanApp) -> ScanHello {
-        ScanHello(app: app,
+        var capabilities = ScanCapability.supported
+        #if targetEnvironment(simulator)
+        if app == .camera {
+            capabilities.removeAll { $0 == ScanCapability.settings || $0 == ScanCapability.captureSettings }
+        }
+        #endif
+        return ScanHello(app: app,
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
-            protocolVersion: ScanWire.version, capabilities: ScanCapability.supported)
+            protocolVersion: ScanWire.version, capabilities: capabilities)
     }
     var summary: String { "\(app.rawValue) \(appVersion) (build \(build), protocol \(protocolVersion))" }
 }

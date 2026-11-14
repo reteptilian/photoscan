@@ -13,7 +13,16 @@ struct CameraPhoto: Sendable {
 }
 
 final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
+    static var isMock: Bool {
+        #if targetEnvironment(simulator)
+        true
+        #else
+        false
+        #endif
+    }
+    static var cameraName: String { isMock ? "Mock camera" : "Main wide-angle camera" }
     let session = AVCaptureSession()
+    private var mockPhoto: CameraPhoto?
     private let queue = DispatchQueue(label: "photoscan.camera")
     private let output = AVCapturePhotoOutput()
     private var completion: (@Sendable (Result<CameraPhoto, Error>) -> Void)?
@@ -25,6 +34,13 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
 
     func start(completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         queue.async {
+            if Self.isMock {
+                do {
+                    self.mockPhoto = try Self.makeMockPhoto()
+                    completion(.success(()))
+                } catch { completion(.failure(error)) }
+                return
+            }
             do {
                 self.session.beginConfiguration()
                 defer { self.session.commitConfiguration() }
@@ -116,6 +132,10 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
 
     func capture(completion: @escaping @Sendable (Result<CameraPhoto, Error>) -> Void) {
         queue.async {
+            if Self.isMock {
+                completion(self.mockPhoto.map { .success($0) } ?? .failure(CameraError.unavailable))
+                return
+            }
             guard self.session.isRunning, self.completion == nil, !self.changingSettings else {
                 completion(.failure(CameraError.unavailable)); return
             }
@@ -133,6 +153,23 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
             }
             self.output.capturePhoto(with: settings, delegate: self)
         }
+    }
+    private static func makeMockPhoto() throws -> CameraPhoto {
+        let width = 1200, height = 1600
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { throw CameraError.noImage }
+        context.setFillColor(CGColor(gray: 0.5, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let data = NSMutableData()
+        guard let image = context.makeImage(),
+              let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else {
+            throw CameraError.noImage
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw CameraError.noImage }
+        return CameraPhoto(data: data as Data, width: width, height: height, fileExtension: "jpg",
+            settings: nil, iso: nil, exposureSeconds: nil)
     }
     func photoOutput(_ output: AVCapturePhotoOutput, willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
         queue.async { self.captureSettings = self.snapshot() }

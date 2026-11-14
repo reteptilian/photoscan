@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct PhotoScanDeskApp: App {
+    @StateObject private var model = DeskModel()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(model: model)
         }
     }
 }

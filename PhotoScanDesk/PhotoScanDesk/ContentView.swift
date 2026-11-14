@@ -10,7 +10,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @StateObject private var model = DeskModel()
+    @ObservedObject var model: DeskModel
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -111,7 +111,16 @@ struct ContentView: View {
             Divider()
             ZStack {
                 Color(nsColor: .textBackgroundColor)
-                if let preview = model.displayedPreview {
+                if model.folder == nil {
+                    VStack(spacing: 12) {
+                        Image(systemName: "folder.badge.plus").font(.system(size: 48)).foregroundStyle(.secondary)
+                        Text("Choose an Archive Folder to Get Started").font(.title2)
+                        Text("PhotoScan needs a folder to save your original captures and finished scans.\nYour choice will be remembered next time.")
+                            .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                        Button("Choose Archive Folder…", action: model.chooseFolder)
+                            .buttonStyle(.borderedProminent)
+                    }.padding(20)
+                } else if let preview = model.displayedPreview {
                     Image(nsImage: preview).resizable().scaledToFit().padding(20)
                 } else {
                     VStack {
@@ -137,7 +146,12 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 520)
-        .onAppear { model.start() }
+        .task {
+            model.start()
+            // Present the initial picker after the window's first update.
+            await Task.yield()
+            model.prepareArchiveFolder()
+        }
         .sheet(item: $model.chartReference) { chart in
             GrayChartView(chart: chart, model: model)
         }
@@ -157,5 +171,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(model: DeskModel())
 }

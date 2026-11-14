@@ -30,7 +30,10 @@ final class DeskModel: ObservableObject {
     @Published var connectionPath = ""
     private var capturePhase = ""
     @Published var busy = false
-    @Published var folder: URL?
+    @Published private(set) var folder: URL?
+    private let archiveSelection = ArchiveFolderSelection()
+    private var preparedArchive = false
+    private var archiveRestoreFailed = false
     @Published var preview: NSImage?
     @Published var latestURL: URL?
     @Published var dimensions = ""
@@ -171,15 +174,36 @@ final class DeskModel: ObservableObject {
             self.peer?.close("Settings command timed out. Reconnect and try again.")
         }
     }
+    func prepareArchiveFolder() {
+        guard !preparedArchive else { return }
+        preparedArchive = true
+        do {
+            folder = try archiveSelection.restore()
+        } catch {
+            archiveRestoreFailed = true
+            self.error = "The saved archive folder is unavailable. Reconnect its drive or choose another folder. " + error.localizedDescription
+        }
+        if folder == nil { chooseFolder() }
+    }
     func chooseFolder() {
+        guard !busy else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
+        panel.title = "Choose Archive Folder"
+        panel.message = archiveRestoreFailed
+            ? "The saved archive folder could not be opened. Reconnect its drive or choose another folder to save your scans. PhotoScan will remember your choice."
+            : "Choose where PhotoScan saves your original captures and finished scans. This folder is required to capture photos and will be remembered next time."
         panel.prompt = "Choose Archive"
+        panel.directoryURL = folder
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        if let folder { folder.stopAccessingSecurityScopedResource() }
-        _ = url.startAccessingSecurityScopedResource()
-        folder = url; error = nil; flatField = nil; grayBalance = nil; chartReference = nil
+        do {
+            try archiveSelection.select(url)
+            archiveRestoreFailed = false
+            folder = url; error = nil; flatField = nil; grayBalance = nil; chartReference = nil
+        } catch {
+            self.error = "Could not use this archive folder. Choose a folder you can read and write. " + error.localizedDescription
+        }
     }
     func capture() {
         beginCapture(reference: false)
