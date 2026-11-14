@@ -138,7 +138,6 @@ final class CameraModel: ObservableObject {
     }
     private func streamSettings() {
         settingsTask?.cancel()
-        guard !CameraEngine.isMock else { return }
         settingsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let peer = self.peer else { return }

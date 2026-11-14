@@ -91,7 +91,14 @@ The cached 1,600-pixel review image includes the accepted calibration but no cro
 
 ## Verification
 
-For desktop UI development without an iPhone, run PhotoScanCamera in an iOS Simulator. It automatically uses a mock camera, skips camera permission, and advertises as **PhotoScan Mock Camera**. Select it in PhotoScanDesk and capture normally; each capture transfers a 1200 × 1600 neutral gray JPEG through the production protocol. Keep the Simulator app running. Settings locking and calibration are unavailable for the mock. A blank image exercises manual crop review rather than print detection. Physical iPhones continue to use the real camera.
+For desktop UI development without an iPhone, run PhotoScanCamera in an iOS Simulator. It automatically uses a mock camera, skips camera permission, and advertises as **PhotoScan Mock Camera**. Select it in PhotoScanDesk and capture normally; each capture transfers a 1200 × 1600 neutral gray JPEG through the production protocol. Keep the Simulator app running. The mock streams fixed simulated camera settings and supports Lock/Unlock Settings. Select an archive folder and Lock Settings to enable Capture Flat Field and Capture Gray Chart. For gray balance, drag a rectangle anywhere inside the uniform gray image and use either target. These synthetic references exercise capture, selection, profile storage, correction toggles, and clearing profiles on unlock; they do not validate physical calibration accuracy. A blank image exercises manual crop review rather than print detection. Physical iPhones continue to use the real camera.
+
+MockCameraSmoke runs the production mock engine and calibration algorithms in a booted iOS Simulator. It checks advertised capabilities, initial settings, locking, capture metadata, flat-field and gray-balance profiles, matching subsequent captures, combined correction, and invalidation after unlocking. For an Apple Silicon Mac:
+
+```sh
+xcrun --sdk iphonesimulator swiftc -target arm64-apple-ios17.0-simulator -module-cache-path /tmp/photoscan-module-cache -parse-as-library Shared/ScanProtocol.swift PhotoScanCamera/PhotoScanCamera/CameraEngine.swift PhotoScanDesk/PhotoScanDesk/{FlatField,GrayBalance}.swift Tests/MockCameraSmoke.swift -o /tmp/photoscan-mock-smoke
+xcrun simctl spawn booted /tmp/photoscan-mock-smoke
+```
 
 Build both schemes (camera: generic iOS device, desk: macOS). DiagnosticsSmoke verifies file persistence, bounded rotation, immutable share snapshots, failed writes and recovery. ConnectionSmoke verifies diagnostic relaying without recursion and additionally verifies two consecutive 4 MiB image frames with a settings message between them and partial/completed transfer progress using the production TCP options. Synthetic tests require macOS image/Vision services; a restricted execution sandbox may block them. Use a writable Swift module cache if the default cache is unavailable.
 

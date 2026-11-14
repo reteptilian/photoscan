@@ -23,6 +23,7 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
     static var cameraName: String { isMock ? "Mock camera" : "Main wide-angle camera" }
     let session = AVCaptureSession()
     private var mockPhoto: CameraPhoto?
+    private var mockLocked = false
     private let queue = DispatchQueue(label: "photoscan.camera")
     private let output = AVCapturePhotoOutput()
     private var completion: (@Sendable (Result<CameraPhoto, Error>) -> Void)?
@@ -69,6 +70,12 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
     }
 
     private func snapshot() -> CameraSettings? {
+        if Self.isMock {
+            guard let photo = mockPhoto else { return nil }
+            return CameraSettings(locked: mockLocked, iso: 100, exposureSeconds: 1.0 / 60,
+                focusPosition: 0.5, whiteBalanceTemperature: 5000, whiteBalanceTint: 0,
+                redGain: 1, greenGain: 1, blueGain: 1, width: photo.width, height: photo.height)
+        }
         guard let device else { return nil }
         let gains = device.deviceWhiteBalanceGains
         let balance = device.temperatureAndTintValues(for: gains)
@@ -84,6 +91,13 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
 
     func setLocked(_ locked: Bool, completion: @escaping @Sendable (Result<CameraSettings, Error>) -> Void) {
         queue.async {
+            if Self.isMock {
+                guard self.mockPhoto != nil else { completion(.failure(CameraError.unavailable)); return }
+                self.mockLocked = locked
+                guard let settings = self.snapshot() else { completion(.failure(CameraError.unavailable)); return }
+                completion(.success(settings))
+                return
+            }
             guard let device = self.device, self.session.isRunning, self.completion == nil, !self.changingSettings else {
                 completion(.failure(CameraError.unavailable)); return
             }
@@ -133,7 +147,13 @@ final class CameraEngine: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Se
     func capture(completion: @escaping @Sendable (Result<CameraPhoto, Error>) -> Void) {
         queue.async {
             if Self.isMock {
-                completion(self.mockPhoto.map { .success($0) } ?? .failure(CameraError.unavailable))
+                guard let photo = self.mockPhoto, let settings = self.snapshot() else {
+                    completion(.failure(CameraError.unavailable)); return
+                }
+                // Attach the current lock state rather than the state when the JPEG was generated.
+                completion(.success(CameraPhoto(data: photo.data, width: photo.width, height: photo.height,
+                    fileExtension: photo.fileExtension, settings: settings,
+                    iso: settings.iso, exposureSeconds: settings.exposureSeconds)))
                 return
             }
             guard self.session.isRunning, self.completion == nil, !self.changingSettings else {
